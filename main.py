@@ -4,6 +4,7 @@ import json
 import os
 
 # ================= CONFIGURATION =================
+# ⚠️ REPLACE THIS WITH YOUR ACTUAL TOKEN KEPT SAFE
 TOKEN = "MTQ1OTE2NDczMjAzMTI0MjM0Nw.GOkdIP.HkxafSs-Ew3KaZ3zKnHhK-GnVsJie-zMMCjYRo"
 
 # --- CHANNELS ---
@@ -49,10 +50,12 @@ def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+# Load data on startup
 data = load_data()
 
 # ================= CORE LOGIC =================
 async def add_player_to_slot(interaction, slot_name):
+    """Adds a user to a slot, updates JSON, grants perms, and posts to the slot channel."""
     uid = str(interaction.user.id)
     
     if not REGISTRATION_OPEN:
@@ -66,36 +69,43 @@ async def add_player_to_slot(interaction, slot_name):
         await interaction.response.send_message(f"⚠️ You are already in **{slot_name}**.", ephemeral=True)
         return False
 
-    # Save Data
+    # 1. Save Data
     data["slots"][slot_name].append(uid)
+    
+    # Ensure 'booked_slots' exists for legacy data compatibility
     if "booked_slots" not in data["teams"][uid]:
         data["teams"][uid]["booked_slots"] = []
+    
     data["teams"][uid]["booked_slots"].append(slot_name)
     save_data(data)
 
-    # Grant Perms
+    # 2. Grant Permissions (Private Room)
     guild = interaction.guild
     room_id = ROOM_CHANNELS.get(slot_name)
     if room_id:
         try:
             room = guild.get_channel(room_id)
-            if room: await room.set_permissions(interaction.user, view_channel=True)
-        except: pass
+            if room: 
+                await room.set_permissions(interaction.user, view_channel=True)
+        except Exception as e:
+            print(f"Error setting permissions for {slot_name}: {e}")
 
-    # Post List
+    # 3. Post to Slot List Channel
     slot_list_id = SLOT_LIST_CHANNELS.get(slot_name)
     if slot_list_id:
         try:
             ch = guild.get_channel(slot_list_id)
             if ch: 
                 idx = len(data["slots"][slot_name])
-                team = data["teams"][uid]["team"]
-                await ch.send(f"**{idx:02d}** | {team}")
-        except: pass
+                team_name = data["teams"][uid]["team"]
+                await ch.send(f"**{idx:02d}** | {team_name}")
+        except Exception as e:
+            print(f"Error posting to list channel {slot_name}: {e}")
 
     return True
 
-# ================= VIEWS (BUTTONS) =================
+# ================= VIEWS (BUTTONS & UI) =================
+
 class AutoClaimView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -107,21 +117,29 @@ class AutoClaimView(discord.ui.View):
             return
 
         uid = str(interaction.user.id)
+        # Check if registered
         if uid not in data["teams"]:
             await interaction.response.send_message("❌ Register first.", ephemeral=True)
             return
 
+        # Check if already booked
+        if data["teams"][uid].get("booked_slots"):
+             await interaction.response.send_message("⚠️ You already have a slot!", ephemeral=True)
+             return
+
+        # Find first available slot
         assigned = None
-        for slot in SLOT_LIST_CHANNELS:
-            if len(data["slots"][slot]) < MAX_SLOTS and uid not in data["slots"][slot]:
-                assigned = slot
+        for slot_name in SLOT_LIST_CHANNELS:
+            if len(data["slots"][slot_name]) < MAX_SLOTS and uid not in data["slots"][slot_name]:
+                assigned = slot_name
                 break
         
         if assigned:
-            if await add_player_to_slot(interaction, assigned):
+            success = await add_player_to_slot(interaction, assigned)
+            if success:
                 await interaction.response.send_message(f"✅ Auto-Assigned to **{assigned}**!", ephemeral=True)
         else:
-            await interaction.response.send_message("❌ All slots full!", ephemeral=True)
+            await interaction.response.send_message("❌ All slots are full!", ephemeral=True)
 
 class SlotButton(discord.ui.Button):
     def __init__(self, slot):
@@ -151,8 +169,8 @@ class SlotSelectView(discord.ui.View):
             self.add_item(SlotButton(s))
 
 class TeamModal(discord.ui.Modal, title="Team Registration"):
-    team = discord.ui.TextInput(label="Team Name")
-    p1 = discord.ui.TextInput(label="Player 1")
+    team = discord.ui.TextInput(label="Team Name", placeholder="Enter your team name")
+    p1 = discord.ui.TextInput(label="Player 1 (IGL)", placeholder="IGN / Discord ID")
     p2 = discord.ui.TextInput(label="Player 2", required=False)
     p3 = discord.ui.TextInput(label="Player 3", required=False)
     p4 = discord.ui.TextInput(label="Player 4", required=False)
@@ -166,7 +184,7 @@ class TeamModal(discord.ui.Modal, title="Team Registration"):
         }
         save_data(data)
         await interaction.response.send_message(
-            f"✅ Team **{self.team.value}** Saved! Select Slot:", 
+            f"✅ Team **{self.team.value}** Saved! Now select a slot:", 
             view=SlotSelectView(), 
             ephemeral=True
         )
@@ -179,11 +197,11 @@ class RegisterChoiceView(discord.ui.View):
     async def claim_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
         if uid not in data["teams"]:
-            await interaction.response.send_message("❌ No team found.", ephemeral=True)
+            await interaction.response.send_message("❌ No team found. Please create a new team.", ephemeral=True)
             return
         await interaction.response.send_message("Select a slot:", view=SlotSelectView(), ephemeral=True)
 
-    @discord.ui.button(label="🆕 Create New Team", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🆕 Create/Update Team", style=discord.ButtonStyle.primary)
     async def create_new(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TeamModal())
 
@@ -199,15 +217,19 @@ class MainRegisterView(discord.ui.View):
         
         uid = str(interaction.user.id)
         if uid in data["teams"]:
-             await interaction.response.send_message("Choose option:", view=RegisterChoiceView(), ephemeral=True)
+             # User has data, let them choose to use saved team or make new one
+             await interaction.response.send_message("You are already registered. Choose an option:", view=RegisterChoiceView(), ephemeral=True)
         else:
+            # User has no data, force registration
             await interaction.response.send_modal(TeamModal())
 
-# ================= BOT & COMMANDS =================
+# ================= BOT SETUP =================
 class SlotBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.all())
+    
     async def setup_hook(self):
+        # Add persistent views so buttons work after restart
         self.add_view(MainRegisterView())
         self.add_view(AutoClaimView())
 
@@ -217,7 +239,6 @@ bot = SlotBot()
 def is_admin_channel():
     async def predicate(ctx):
         if ctx.channel.id != ADMIN_COMMAND_CHANNEL_ID:
-            # Optional: Tell them they are in the wrong place, or just ignore
             await ctx.send(f"❌ **Wrong Channel!** Admin commands only work in <#{ADMIN_COMMAND_CHANNEL_ID}>", delete_after=5)
             return False
         return True
@@ -226,24 +247,29 @@ def is_admin_channel():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    print(f"✅ Bot is ready to manage slots.")
 
-# --- COMMAND: SETUP (Only Admin + Only Admin Channel) ---
+# ================= ADMIN COMMANDS =================
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def setup(ctx):
+    """Deletes the command msg and posts the main Registration Panel."""
     await ctx.message.delete()
     
     reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
     if reg_ch:
-        await reg_ch.send("📝 **TOURNAMENT REGISTRATION**", view=MainRegisterView())
+        await reg_ch.send("📝 **TOURNAMENT REGISTRATION**\nClick below to register your team and claim a slot.", view=MainRegisterView())
         await ctx.send(f"✅ Setup panels sent to {reg_ch.mention}", delete_after=5)
+    else:
+        await ctx.send(f"❌ Error: Registration channel ID {REGISTRATION_CHANNEL_ID} not found.")
 
-# --- COMMAND: NOTIFY PENDING (15 Mins Before Match) ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def notify_pending(ctx):
+    """Pings users who registered a team but haven't picked a slot yet."""
     await ctx.message.delete()
     
     # Find users registered but with NO slots booked
@@ -253,36 +279,40 @@ async def notify_pending(ctx):
         await ctx.send("✅ Everyone has a slot!", delete_after=5)
         return
 
+    # Create message for public channel
     msg = (
         "⚠️ **LAST CALL FOR SLOTS!** ⚠️\n"
         f"{', '.join(pending)}\n\n"
-        "**Match starts in 15 mins!** Click below to auto-claim a spot."
+        "**Match starts in 15 mins!** Click below to auto-claim a spot immediately."
     )
     
     reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
     if reg_ch:
         await reg_ch.send(msg, view=AutoClaimView())
-        await ctx.send(f"✅ Notified {len(pending)} pending users.")
+        await ctx.send(f"✅ Notified {len(pending)} pending users in {reg_ch.mention}.", delete_after=5)
 
-# --- COMMAND: LOCK (Match Start) ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def lock(ctx):
+    """Locks registration so no one else can join."""
     global REGISTRATION_OPEN
     REGISTRATION_OPEN = False
     await ctx.send("⛔ **SYSTEM LOCKED.** No more claims allowed.")
     
     reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
-    if reg_ch: await reg_ch.send("⛔ **REGISTRATION CLOSED. MATCH STARTING.**")
+    if reg_ch: 
+        await reg_ch.send("⛔ **REGISTRATION CLOSED. MATCH STARTING.**")
 
-# --- COMMAND: UNLOCK ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def unlock(ctx):
+    """Unlocks registration."""
     global REGISTRATION_OPEN
     REGISTRATION_OPEN = True
     await ctx.send("✅ **SYSTEM UNLOCKED.** Registration is open.")
 
-bot.run(TOKEN)
+# ================= RUN BOT =================
+if __name__ == "__main__":
+    bot.run(TOKEN)
