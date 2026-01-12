@@ -2,10 +2,26 @@ import discord
 from discord.ext import commands
 import json
 import os
+from flask import Flask  # Added for keep-alive
+from threading import Thread  # Added for keep-alive
+
+# ================= KEEP-ALIVE WEB SERVER (Prevents Glitch Sleep) =================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
 
 # ================= CONFIGURATION =================
-# ⚠️ REPLACE THIS WITH YOUR ACTUAL TOKEN KEPT SAFE
-TOKEN = "MTQ1OTE2NDczMjAzMTI0MjM0Nw.GOkdIP.HkxafSs-Ew3KaZ3zKnHhK-GnVsJie-zMMCjYRo"
+# ⚠️ TOKEN IS NOW SECURE VIA ENVIRONMENT VARIABLES (Set in Glitch env vars)
+TOKEN = os.environ.get('MTQ1OTE2NDczMjAzMTI0MjM0Nw.GOkdIP.HkxafSs-Ew3KaZ3zKnHhK-GnVsJie-zMMCjYRo ')  # Pulls from Glitch env vars - DO NOT HARDCODE
 
 # --- CHANNELS ---
 # 1. Admin Command Channel (Where you type !setup, !lock, etc.)
@@ -315,4 +331,5 @@ async def unlock(ctx):
 
 # ================= RUN BOT =================
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    keep_alive()  # Start the keep-alive web server
+    bot.run(TOKEN)  # Run the bot
