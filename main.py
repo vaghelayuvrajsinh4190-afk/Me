@@ -24,7 +24,7 @@ def keep_alive():
 # ================= CONFIGURATION =================
 # ⚠️ TOKEN IS SECURE VIA ENVIRONMENT VARIABLES
 # Make sure you set 'TOKEN' in your Render Environment Variables!
-TOKEN = os.environ.get('MTQ1OTE2NDczMjAzMTI0MjM0Nw.GOkdIP.HkxafSs-Ew3KaZ3zKnHhK-GnVsJie-zMMCjYRo')
+TOKEN = os.environ.get("MTQ1OTE2NDczMjAzMTI0MjM0Nw.GOkdIP.HkxafSs-Ew3KaZ3zKnHhK-GnVsJie-zMMCjYRo")
 
 # --- CHANNELS ---
 # 1. Admin Command Channel (Where you type !setup, !lock, etc.)
