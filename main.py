@@ -14,6 +14,9 @@ REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
 
+# [NEW] The Public Channel where the Final Slot List (Table) will be sent
+FINAL_SLOT_LIST_CHANNEL_ID = 1460626672184197202 
+
 # Slot Text Channels (Locked to role)
 SLOT_LIST_CHANNELS = {
     "SLOT_1": 1459460237437435999,
@@ -38,7 +41,10 @@ SLOT_ROLES = {
     "SLOT_4": "Slot 4 Player"
 }
 
-MAX_SLOTS = 16
+# [NEW] The ID of the role to Tag when Final List is published
+PLAYER_ROLE_TAG_ID = 111111111111111111  # Replace with actual Role ID
+
+MAX_SLOTS = 20
 DATA_FILE = "data.json"
 REGISTRATION_OPEN = True
 
@@ -195,27 +201,80 @@ async def remove_all_slots_logic(interaction):
 
 # ================= VIEWS =================
 
-# --- NEW: CANCEL DROPDOWN MENU ---
+# --- NEW: FINAL SLOT LIST VIEW (Admin/Staff Only) ---
+class FinalSlotView(discord.ui.View):
+    def __init__(self, bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="🚀 Publish Final Slot List", style=discord.ButtonStyle.green, custom_id="pub_final_list_btn")
+    async def publish_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 1. Permission Check
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+
+        # 2. Get Target Channel
+        target_channel = self.bot.get_channel(FINAL_SLOT_LIST_CHANNEL_ID)
+        if not target_channel:
+            await interaction.response.send_message("❌ Error: Final List Channel ID not found.", ephemeral=True)
+            return
+
+        # 3. Generate Table Data from Real Data
+        table_lines = []
+        table_lines.append(f"{'SLOT':<8} | {'TEAM NAME'}")
+        table_lines.append("-" * 35)
+
+        # Loop through defined slots (SLOT_1, SLOT_2...)
+        for slot_key in SLOT_LIST_CHANNELS.keys():
+            registered_uids = data["slots"].get(slot_key, [])
+            
+            # Format Slot Name (e.g., SLOT_1 -> Slot 1)
+            display_slot = slot_key.replace("_", " ").title()
+
+            if not registered_uids:
+                table_lines.append(f"{display_slot:<8} | [OPEN]")
+            else:
+                # If multiple people in one slot (shouldn't happen in your logic, but handling it)
+                for uid in registered_uids:
+                    team_name = data["teams"].get(uid, {}).get("team", "Unknown Team")
+                    table_lines.append(f"{display_slot:<8} | {team_name}")
+
+        tabular_data = "\n".join(table_lines)
+
+        # 4. Create Embed
+        embed = discord.Embed(
+            title="🏆 FINAL SLOT LIST",
+            description="**Match is starting soon!**\nCheck your slot number below.",
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="Confirmed Slots", value=f"```text\n{tabular_data}\n```", inline=False)
+        embed.set_footer(text="Final Circle Syndicate • Good Luck!")
+
+        # 5. Send Message
+        try:
+            await target_channel.send(content=f"Attention <@&{PLAYER_ROLE_TAG_ID}>! The list is out.", embed=embed)
+            await interaction.response.send_message(f"✅ Final List posted in {target_channel.mention}!", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Error sending message: {e}", ephemeral=True)
+
+# --- CANCEL DROPDOWN MENU ---
 class CancelDropdown(discord.ui.Select):
     def __init__(self, booked_slots):
         options = []
-        # Add option for each slot the user owns
         for slot in booked_slots:
             options.append(discord.SelectOption(label=f"Cancel {slot}", value=slot, emoji="🗑️"))
         
-        # Add 'Cancel All' option
         options.append(discord.SelectOption(label="Cancel ALL Slots", value="ALL", emoji="❌", description="Remove me from everything"))
 
         super().__init__(placeholder="Select slot to cancel...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         choice = self.values[0]
-        
         if choice == "ALL":
             success, msg = await remove_all_slots_logic(interaction)
         else:
             success, msg = await remove_single_slot_logic(interaction, choice)
-            
         await interaction.response.send_message(msg, ephemeral=True)
 
 class CancelSelectView(discord.ui.View):
@@ -224,7 +283,6 @@ class CancelSelectView(discord.ui.View):
         self.add_item(CancelDropdown(booked_slots))
 
 # --- EXISTING VIEWS ---
-
 class AutoClaimView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -388,6 +446,7 @@ class SlotBot(commands.Bot):
         self.add_view(MainRegisterView())
         self.add_view(AutoClaimView())
         self.add_view(CancelAndClaimView())
+        self.add_view(FinalSlotView(self)) # <--- ADDED FINAL SLOT VIEW HERE
 
 bot = SlotBot()
 
@@ -421,6 +480,22 @@ async def setup(ctx):
         await can_ch.send(embed=embed, view=CancelAndClaimView())
 
     await msg.edit(content="✅ **Setup Complete!**")
+
+# --- NEW COMMAND: SETUP FINAL SLOT PANEL ---
+@bot.command()
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def setup_final(ctx):
+    """Creates the button panel for Staff to publish the Final List."""
+    await ctx.message.delete()
+    
+    embed = discord.Embed(
+        title="🎛️ Final Slot Manager",
+        description="Click below to **Publish** the slot list to the public channel.",
+        color=discord.Color.dark_grey()
+    )
+    await ctx.send(embed=embed, view=FinalSlotView(bot))
+
 
 @bot.command()
 @commands.has_permissions(administrator=True)
