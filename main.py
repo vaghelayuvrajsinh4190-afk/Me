@@ -6,6 +6,7 @@ import asyncio
 import keep_alive  # <--- IMPORTS YOUR KEEP_ALIVE FILE
 
 # ================= CONFIGURATION =================
+# ⚠️ MAKE SURE YOU ADD 'TOKEN' TO YOUR ENVIRONMENT VARIABLES
 TOKEN = os.environ.get("TOKEN")
 
 # --- CHANNELS ---
@@ -455,6 +456,6 @@ async def unlock(ctx):
     await ctx.send("✅ **SYSTEM UNLOCKED.** Registration is open.")
 
 if __name__ == "__main__":
-    # ⚠️ THIS IS THE PART THAT CONNECTS TO FILE 2
+    # ⚠️ THIS STARTS THE WEB SERVER FOR 24/7 HOSTING
     keep_alive.keep_alive()  
     bot.run(TOKEN)
