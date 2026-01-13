@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from keep_alive import kepp_alive
 import json
 import os
 import asyncio
@@ -467,4 +468,5 @@ async def unlock(ctx):
     await ctx.send("✅ **SYSTEM UNLOCKED.** Registration is open.")
 
 if __name__ == "__main__":
+    keep_alive()
     bot.run(TOKEN)
