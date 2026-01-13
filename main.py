@@ -3,10 +3,9 @@ from discord.ext import commands
 import json
 import os
 import asyncio
-import keep_alive  # <--- IMPORTS YOUR KEEP_ALIVE FILE
+import keep_alive
 
 # ================= CONFIGURATION =================
-# ⚠️ MAKE SURE YOU ADD 'TOKEN' TO YOUR ENVIRONMENT VARIABLES
 TOKEN = os.environ.get("TOKEN")
 
 # --- CHANNELS ---
@@ -15,7 +14,7 @@ REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
 
-# 3. Slot Text Channels (Chat/List) - Locked to role
+# Slot Text Channels (Locked to role)
 SLOT_LIST_CHANNELS = {
     "SLOT_1": 1459460237437435999,
     "SLOT_2": 1459471324593389725,
@@ -23,7 +22,7 @@ SLOT_LIST_CHANNELS = {
     "SLOT_4": 1459472478651945070
 }
 
-# 4. Private Room Channels (ID/Pass) - Locked to role
+# Private Room Channels (ID/Pass)
 ROOM_CHANNELS = {
     "SLOT_1": 1458788771716792486,
     "SLOT_2": 1459772021448904822,
@@ -31,7 +30,7 @@ ROOM_CHANNELS = {
     "SLOT_4": 1459772130232373512
 }
 
-# 5. Role Names (Bot will look for these or create them)
+# Role Names
 SLOT_ROLES = {
     "SLOT_1": "Slot 1 Player",
     "SLOT_2": "Slot 2 Player",
@@ -61,19 +60,16 @@ data = load_data()
 
 # ================= HELPER: MANAGE ROLES =================
 async def get_or_create_role(guild, role_name):
-    """Finds a role by name, or creates it if missing."""
     role = discord.utils.get(guild.roles, name=role_name)
     if not role:
         try:
             role = await guild.create_role(name=role_name, mentionable=True)
-            print(f"🆕 Created new role: {role_name}")
         except Exception as e:
             print(f"❌ Error creating role {role_name}: {e}")
             return None
     return role
 
 async def setup_channel_perms(guild):
-    """Locks channels so ONLY the bot and the specific Role can see them."""
     for slot_name, role_name in SLOT_ROLES.items():
         role = await get_or_create_role(guild, role_name)
         if not role: continue
@@ -97,7 +93,6 @@ async def setup_channel_perms(guild):
 # ================= CORE LOGIC =================
 
 async def add_player_to_slot(interaction, slot_name):
-    """Adds user to data, assigns ROLE, and updates channel."""
     uid = str(interaction.user.id)
     guild = interaction.guild
     
@@ -117,10 +112,12 @@ async def add_player_to_slot(interaction, slot_name):
     if "booked_slots" not in data["teams"][uid]:
         data["teams"][uid]["booked_slots"] = []
     
-    data["teams"][uid]["booked_slots"].append(slot_name)
+    if slot_name not in data["teams"][uid]["booked_slots"]:
+        data["teams"][uid]["booked_slots"].append(slot_name)
+        
     save_data(data)
 
-    # 2. Assign Role (Auto Role)
+    # 2. Assign Role
     role_name = SLOT_ROLES.get(slot_name)
     if role_name:
         role = await get_or_create_role(guild, role_name)
@@ -128,9 +125,7 @@ async def add_player_to_slot(interaction, slot_name):
             try:
                 await interaction.user.add_roles(role)
             except discord.Forbidden:
-                print(f"❌ Bot missing permissions to add role {role_name}")
-            except Exception as e:
-                print(f"Error adding role: {e}")
+                pass
 
     # 3. Post to List Channel
     slot_list_id = SLOT_LIST_CHANNELS.get(slot_name)
@@ -146,47 +141,89 @@ async def add_player_to_slot(interaction, slot_name):
 
     return True
 
-async def remove_player_logic(interaction):
-    """Removes user from data AND removes their role."""
+async def remove_single_slot_logic(interaction, slot_to_remove):
+    """Removes user from ONE specific slot."""
     uid = str(interaction.user.id)
-    
-    if uid not in data["teams"] or not data["teams"][uid].get("booked_slots"):
-        return False, "You don't have any booked slots to cancel."
-
-    booked = data["teams"][uid]["booked_slots"]
     guild = interaction.guild
-    removed_from = []
     
-    for slot_name in booked:
-        if uid in data["slots"][slot_name]:
-            data["slots"][slot_name].remove(uid)
-            removed_from.append(slot_name)
-            
-            # Remove Role
-            role_name = SLOT_ROLES.get(slot_name)
-            if role_name:
-                role = discord.utils.get(guild.roles, name=role_name)
-                if role:
-                    try:
-                        await interaction.user.remove_roles(role)
-                    except Exception as e:
-                        print(f"Error removing role: {e}")
+    # Validation
+    if uid not in data["teams"]: return False, "No team data."
+    booked = data["teams"][uid].get("booked_slots", [])
+    
+    if slot_to_remove not in booked:
+        return False, "You don't own this slot."
 
-            # Notify in slot channel
-            list_ch_id = SLOT_LIST_CHANNELS.get(slot_name)
-            if list_ch_id:
-                try:
-                    ch = guild.get_channel(list_ch_id)
-                    if ch:
-                        await ch.send(f"🔻 **Slot Cancelled!** 1 Space opened up.")
-                except:
-                    pass
-
-    data["teams"][uid]["booked_slots"] = []
+    # 1. Remove from Slot List
+    if uid in data["slots"][slot_to_remove]:
+        data["slots"][slot_to_remove].remove(uid)
+    
+    # 2. Remove from User's Booking List
+    data["teams"][uid]["booked_slots"].remove(slot_to_remove)
     save_data(data)
-    return True, f"✅ Successfully cancelled slot(s): **{', '.join(removed_from)}**. Roles removed."
 
-# ================= VIEWS (BUTTONS) =================
+    # 3. Remove Role
+    role_name = SLOT_ROLES.get(slot_to_remove)
+    if role_name:
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role:
+            try:
+                await interaction.user.remove_roles(role)
+            except Exception as e:
+                pass
+
+    # 4. Notify Channel
+    list_ch_id = SLOT_LIST_CHANNELS.get(slot_to_remove)
+    if list_ch_id:
+        try:
+            ch = guild.get_channel(list_ch_id)
+            if ch: await ch.send(f"🔻 **Slot Cancelled!** 1 Space opened up.")
+        except: pass
+
+    return True, f"✅ Successfully cancelled **{slot_to_remove}**."
+
+async def remove_all_slots_logic(interaction):
+    """Removes user from ALL booked slots."""
+    uid = str(interaction.user.id)
+    if uid not in data["teams"] or not data["teams"][uid].get("booked_slots"):
+        return False, "You have no slots to cancel."
+
+    booked = list(data["teams"][uid]["booked_slots"]) # Copy list
+    for s in booked:
+        await remove_single_slot_logic(interaction, s)
+    
+    return True, "✅ All slots cancelled."
+
+# ================= VIEWS =================
+
+# --- NEW: CANCEL DROPDOWN MENU ---
+class CancelDropdown(discord.ui.Select):
+    def __init__(self, booked_slots):
+        options = []
+        # Add option for each slot the user owns
+        for slot in booked_slots:
+            options.append(discord.SelectOption(label=f"Cancel {slot}", value=slot, emoji="🗑️"))
+        
+        # Add 'Cancel All' option
+        options.append(discord.SelectOption(label="Cancel ALL Slots", value="ALL", emoji="❌", description="Remove me from everything"))
+
+        super().__init__(placeholder="Select slot to cancel...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        
+        if choice == "ALL":
+            success, msg = await remove_all_slots_logic(interaction)
+        else:
+            success, msg = await remove_single_slot_logic(interaction, choice)
+            
+        await interaction.response.send_message(msg, ephemeral=True)
+
+class CancelSelectView(discord.ui.View):
+    def __init__(self, booked_slots):
+        super().__init__(timeout=60)
+        self.add_item(CancelDropdown(booked_slots))
+
+# --- EXISTING VIEWS ---
 
 class AutoClaimView(discord.ui.View):
     def __init__(self):
@@ -203,10 +240,6 @@ class AutoClaimView(discord.ui.View):
             await interaction.response.send_message("❌ Register first.", ephemeral=True)
             return
 
-        if data["teams"][uid].get("booked_slots"):
-             await interaction.response.send_message("⚠️ You already have a slot!", ephemeral=True)
-             return
-
         assigned = None
         for slot_name in SLOT_LIST_CHANNELS:
             if len(data["slots"][slot_name]) < MAX_SLOTS and uid not in data["slots"][slot_name]:
@@ -218,7 +251,7 @@ class AutoClaimView(discord.ui.View):
             if success:
                 await interaction.response.send_message(f"✅ Auto-Assigned to **{assigned}**!", ephemeral=True)
         else:
-            await interaction.response.send_message("❌ All slots are full!", ephemeral=True)
+            await interaction.response.send_message("❌ All slots are full or you joined them all!", ephemeral=True)
 
 class SlotButton(discord.ui.Button):
     def __init__(self, slot):
@@ -238,7 +271,7 @@ class SlotButton(discord.ui.Button):
         if success:
             await interaction.response.send_message(f"✅ Claimed **{self.slot}**.", ephemeral=True)
         else:
-             await interaction.response.send_message("❌ Slot Full or Error.", ephemeral=True)
+             pass 
 
 class SlotSelectView(discord.ui.View):
     def __init__(self):
@@ -255,12 +288,21 @@ class TeamModal(discord.ui.Modal, title="Team Registration"):
     
     async def on_submit(self, interaction: discord.Interaction):
         uid = str(interaction.user.id)
+        
         data["teams"][uid] = {
             "team": self.team.value,
             "players": [self.p1.value, self.p2.value, self.p3.value, self.p4.value],
             "booked_slots": []
         }
         save_data(data)
+        
+        log_channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if log_channel:
+            embed = discord.Embed(title="🆕 New Team Registered", color=discord.Color.blue())
+            embed.add_field(name="Team Name", value=self.team.value, inline=False)
+            embed.add_field(name="IGL", value=f"{self.p1.value} (<@{uid}>)", inline=False)
+            await log_channel.send(embed=embed)
+
         await interaction.response.send_message(
             f"✅ Team **{self.team.value}** Saved! Now select a slot:", 
             view=SlotSelectView(), 
@@ -271,15 +313,17 @@ class RegisterChoiceView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=60)
 
-    @discord.ui.button(label="🏆 Claim Slot (Saved Team)", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="🏆 Use Saved Team", style=discord.ButtonStyle.success)
     async def claim_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
         if uid not in data["teams"]:
             await interaction.response.send_message("❌ No team found. Please create a new team.", ephemeral=True)
             return
-        await interaction.response.send_message("Select a slot:", view=SlotSelectView(), ephemeral=True)
+        
+        team_name = data["teams"][uid]["team"]
+        await interaction.response.send_message(f"Using saved team: **{team_name}**. Select a slot:", view=SlotSelectView(), ephemeral=True)
 
-    @discord.ui.button(label="🆕 Create/Update Team", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🆕 Update / New Team", style=discord.ButtonStyle.primary)
     async def create_new(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TeamModal())
 
@@ -295,7 +339,7 @@ class MainRegisterView(discord.ui.View):
         
         uid = str(interaction.user.id)
         if uid in data["teams"]:
-             await interaction.response.send_message("Choose an option:", view=RegisterChoiceView(), ephemeral=True)
+             await interaction.response.send_message("You are already registered. Choose an option:", view=RegisterChoiceView(), ephemeral=True)
         else:
             await interaction.response.send_modal(TeamModal())
 
@@ -306,12 +350,20 @@ class CancelAndClaimView(discord.ui.View):
     @discord.ui.button(label="🗑️ Cancel My Slot", style=discord.ButtonStyle.danger, custom_id="cancel_slot_btn")
     async def cancel_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
+        
+        # Check if registered
         if uid not in data["teams"]:
             await interaction.response.send_message("❌ You are not registered.", ephemeral=True)
             return
+        
+        # Check booked slots
+        booked = data["teams"][uid].get("booked_slots", [])
+        if not booked:
+             await interaction.response.send_message("⚠️ You don't have any booked slots to cancel.", ephemeral=True)
+             return
 
-        success, msg = await remove_player_logic(interaction)
-        await interaction.response.send_message(msg, ephemeral=True)
+        # SEND DROPDOWN MENU
+        await interaction.response.send_message("🔻 **Select which slot to cancel:**", view=CancelSelectView(booked), ephemeral=True)
 
     @discord.ui.button(label="♻️ Claim Open Slot", style=discord.ButtonStyle.primary, custom_id="claim_open_btn")
     async def claim_open(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -325,20 +377,7 @@ class CancelAndClaimView(discord.ui.View):
             await interaction.response.send_message("❌ You must register a team first.", ephemeral=True)
             return
         
-        if data["teams"][uid].get("booked_slots"):
-            await interaction.response.send_message("⚠️ You already have a slot! Cancel it first.", ephemeral=True)
-            return
-
-        available = False
-        for s in SLOT_LIST_CHANNELS:
-            if len(data["slots"][s]) < MAX_SLOTS:
-                available = True
-                break
-        
-        if available:
-            await interaction.response.send_message("✅ Slots are available! Pick one:", view=SlotSelectView(), ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ **All slots are currently FULL.** Wait for someone to cancel.", ephemeral=True)
+        await interaction.response.send_message("✅ Checking availability... Pick one:", view=SlotSelectView(), ephemeral=True)
 
 # ================= BOT SETUP =================
 class SlotBot(commands.Bot):
@@ -368,42 +407,40 @@ async def on_ready():
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def setup(ctx):
-    """Sets up Channels, Roles, and Panels."""
     await ctx.message.delete()
-    
-    msg = await ctx.send("⚙️ **Configuring Roles & Channels... (This might take a moment)**")
-    
+    msg = await ctx.send("⚙️ **Configuring Roles & Channels...**")
     await setup_channel_perms(ctx.guild)
     
-    # 1. Post Registration Panel
     reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
     if reg_ch:
         await reg_ch.send("📝 **TOURNAMENT REGISTRATION**\nClick below to register your team.", view=MainRegisterView())
     
-    # 2. Post Cancel/Claim Panel
     can_ch = ctx.guild.get_channel(CANCEL_CLAIM_CHANNEL_ID)
     if can_ch:
         embed = discord.Embed(title="Slot Management", description="Use this menu to **Cancel** your booking or **Claim** a slot if one opens up.", color=discord.Color.orange())
         await can_ch.send(embed=embed, view=CancelAndClaimView())
 
-    await msg.edit(content="✅ **Setup Complete!** Roles created, Channels locked, Panels posted.")
+    await msg.edit(content="✅ **Setup Complete!**")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
-async def notify_start(ctx, minutes: int = 10):
-    """Notifies specific slot roles that match starts in X minutes."""
+async def notify_start(ctx, minutes: int, slot_name: str = None):
     await ctx.message.delete()
+    target_slot = slot_name.upper() if slot_name else None
     
     count = 0
-    for slot_name, channel_id in SLOT_LIST_CHANNELS.items():
-        role_name = SLOT_ROLES.get(slot_name)
+    for s_name, channel_id in SLOT_LIST_CHANNELS.items():
+        if target_slot and s_name != target_slot:
+            continue
+
+        role_name = SLOT_ROLES.get(s_name)
         if not role_name: continue
         
         role = discord.utils.get(ctx.guild.roles, name=role_name)
         channel = ctx.guild.get_channel(channel_id)
         
-        room_channel_id = ROOM_CHANNELS.get(slot_name)
+        room_channel_id = ROOM_CHANNELS.get(s_name)
         room_channel = ctx.guild.get_channel(room_channel_id) if room_channel_id else None
 
         if role and channel:
@@ -415,27 +452,11 @@ async def notify_start(ctx, minutes: int = 10):
             )
             count += 1
             
-    await ctx.send(f"✅ Sent start notifications to {count} active slot channels.", delete_after=5)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-@is_admin_channel()
-async def notify_pending(ctx):
-    await ctx.message.delete()
-    pending = [f"<@{uid}>" for uid, d in data["teams"].items() if not d.get("booked_slots")]
-    
-    if not pending:
-        await ctx.send("✅ Everyone has a slot!", delete_after=5)
-        return
-
-    msg = (
-        "⚠️ **LAST CALL FOR SLOTS!** ⚠️\n"
-        f"{', '.join(pending)}\n\n"
-        "**Match starts soon!** Click below to auto-claim."
-    )
-    reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
-    if reg_ch:
-        await reg_ch.send(msg, view=AutoClaimView())
+    if count == 0:
+        await ctx.send(f"❌ No channels found for slot: {target_slot}" if target_slot else "❌ No channels found.", delete_after=5)
+    else:
+        target_msg = target_slot if target_slot else "ALL slots"
+        await ctx.send(f"✅ Sent start notifications to {count} channels ({target_msg}).", delete_after=5)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -456,6 +477,5 @@ async def unlock(ctx):
     await ctx.send("✅ **SYSTEM UNLOCKED.** Registration is open.")
 
 if __name__ == "__main__":
-    # ⚠️ THIS STARTS THE WEB SERVER FOR 24/7 HOSTING
     keep_alive.keep_alive()  
     bot.run(TOKEN)
