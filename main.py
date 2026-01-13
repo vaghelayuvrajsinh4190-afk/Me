@@ -1,12 +1,11 @@
 import discord
 from discord.ext import commands
-from keep_alive import kepp_alive
 import json
 import os
 import asyncio
+import keep_alive  # <--- IMPORTS YOUR KEEP_ALIVE FILE
 
 # ================= CONFIGURATION =================
-# Ensure you set 'TOKEN' in your Environment Variables
 TOKEN = os.environ.get("TOKEN")
 
 # --- CHANNELS ---
@@ -78,17 +77,14 @@ async def setup_channel_perms(guild):
         role = await get_or_create_role(guild, role_name)
         if not role: continue
 
-        # Defined channels for this slot
         channels_to_lock = []
         if slot_name in SLOT_LIST_CHANNELS:
             channels_to_lock.append(guild.get_channel(SLOT_LIST_CHANNELS[slot_name]))
         if slot_name in ROOM_CHANNELS:
             channels_to_lock.append(guild.get_channel(ROOM_CHANNELS[slot_name]))
         
-        # Apply Overwrites
         for ch in channels_to_lock:
             if ch:
-                # Deny @everyone, Allow Role
                 overwrites = {
                     guild.default_role: discord.PermissionOverwrite(view_channel=False),
                     role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -185,10 +181,8 @@ async def remove_player_logic(interaction):
                 except:
                     pass
 
-    # Clear user data
     data["teams"][uid]["booked_slots"] = []
     save_data(data)
-    
     return True, f"✅ Successfully cancelled slot(s): **{', '.join(removed_from)}**. Roles removed."
 
 # ================= VIEWS (BUTTONS) =================
@@ -378,7 +372,6 @@ async def setup(ctx):
     
     msg = await ctx.send("⚙️ **Configuring Roles & Channels... (This might take a moment)**")
     
-    # Run the setup for roles and permissions
     await setup_channel_perms(ctx.guild)
     
     # 1. Post Registration Panel
@@ -402,24 +395,18 @@ async def notify_start(ctx, minutes: int = 10):
     await ctx.message.delete()
     
     count = 0
-    # Loop through every slot channel
     for slot_name, channel_id in SLOT_LIST_CHANNELS.items():
-        # Get the Role name for this slot
         role_name = SLOT_ROLES.get(slot_name)
         if not role_name: continue
         
-        # Find the actual Role object and Channel object
         role = discord.utils.get(ctx.guild.roles, name=role_name)
         channel = ctx.guild.get_channel(channel_id)
         
-        # Get the Room channel for linking
         room_channel_id = ROOM_CHANNELS.get(slot_name)
         room_channel = ctx.guild.get_channel(room_channel_id) if room_channel_id else None
 
         if role and channel:
             room_link = room_channel.mention if room_channel else "the room channel"
-            
-            # Send the specific notification
             await channel.send(
                 f"⚠️ {role.mention} **ATTENTION!** ⚠️\n"
                 f"Match is starting in **{minutes} minutes**!\n"
@@ -468,5 +455,6 @@ async def unlock(ctx):
     await ctx.send("✅ **SYSTEM UNLOCKED.** Registration is open.")
 
 if __name__ == "__main__":
-    keep_alive()
+    # ⚠️ THIS IS THE PART THAT CONNECTS TO FILE 2
+    keep_alive.keep_alive()  
     bot.run(TOKEN)
