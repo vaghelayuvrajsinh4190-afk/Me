@@ -1,8 +1,2 @@
-flask
 discord.py
-requests
-# Add your specific bot library below (Uncomment the one you use):
-# discord.py
-# pyrogram
-# telebot
-# python-telegram-bot
+flask
