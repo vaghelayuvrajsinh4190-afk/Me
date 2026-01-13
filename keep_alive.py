@@ -9,7 +9,7 @@ def home():
     return "Bot is alive!"
 
 def run():
-    # Gets the PORT from the environment (Render/Heroku) or uses 8080
+    # Uses the PORT provided by the hosting service or defaults to 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
