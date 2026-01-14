@@ -38,7 +38,7 @@ SLOT_ROLES = {
     "SLOT_4": "Slot 4 Player"
 }
 
-MAX_SLOTS = 20
+MAX_SLOTS = 16
 DATA_FILE = "data.json"
 REGISTRATION_OPEN = True
 
