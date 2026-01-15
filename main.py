@@ -15,7 +15,7 @@ REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
 
-# RENAMED TO MATCH 1, 2, 3, 4
+# MATCH CHANNELS
 SLOT_LIST_CHANNELS = {
     "MATCH_1": 1459460237437435999,
     "MATCH_2": 1459471324593389725,
@@ -23,7 +23,7 @@ SLOT_LIST_CHANNELS = {
     "MATCH_4": 1459472478651945070
 }
 
-# PRIVATE ROOM CHANNELS (For ID/Pass)
+# ROOM CHANNELS
 ROOM_CHANNELS = {
     "MATCH_1": 1458788771716792486,
     "MATCH_2": 1459772021448904822,
@@ -31,7 +31,7 @@ ROOM_CHANNELS = {
     "MATCH_4": 1459772130232373512
 }
 
-# ROLE NAMES (Must match your Discord Server roles exactly)
+# ROLES
 SLOT_ROLES = {
     "MATCH_1": "Match 1 Player",
     "MATCH_2": "Match 2 Player",
@@ -39,10 +39,11 @@ SLOT_ROLES = {
     "MATCH_4": "Match 4 Player"
 }
 
-MAX_SLOTS = 16
+MAX_SLOTS = 20
 DATA_FILE = "data.json"
 REGISTRATION_OPEN = True
 TIMEZONE_OFFSET = 5.5 # India Standard Time
+DATA_EXPIRY_DAYS = 7  # Delete team data after 7 days
 
 # ================= 2. DATA HANDLING =================
 def load_data():
@@ -60,17 +61,11 @@ def load_data():
         data = json.load(f)
         if "table_messages" not in data:
             data["table_messages"] = {}
-        
-        # MIGRATION: Convert old "SLOT" data to "MATCH" data automatically
+        # Migration to MATCH keys
         if "SLOT_1" in data["slots"]:
-            print("🔄 Migrating old data to new MATCH format...")
-            new_slots = {}
-            for k, v in data["slots"].items():
-                new_key = k.replace("SLOT", "MATCH")
-                new_slots[new_key] = v
+            new_slots = {k.replace("SLOT", "MATCH"): v for k, v in data["slots"].items()}
             data["slots"] = new_slots
             save_data(data)
-            
         return data
 
 def save_data(data):
@@ -79,7 +74,7 @@ def save_data(data):
 
 data = load_data()
 
-# ================= 3. HELPER: MANAGE ROLES =================
+# ================= 3. HELPER FUNCTIONS =================
 async def get_or_create_role(guild, role_name):
     role = discord.utils.get(guild.roles, name=role_name)
     if not role:
@@ -117,8 +112,6 @@ async def refresh_table(guild, slot_name):
     if not channel: return
 
     registered_uids = data["slots"].get(slot_name, [])
-    
-    # Header
     table_lines = [f"{'NO.':<3} | {'TEAM NAME'}", "-" * 30]
     
     for i in range(MAX_SLOTS):
@@ -132,8 +125,7 @@ async def refresh_table(guild, slot_name):
             table_lines.append(f"{slot_num:02d}  | [ OPEN ]")
 
     tabular_data = "\n".join(table_lines)
-    
-    display_name = slot_name.replace("_", " ") # "MATCH 1"
+    display_name = slot_name.replace("_", " ")
     count = len(registered_uids)
     color = discord.Color.green() if count < MAX_SLOTS else discord.Color.red()
     status = "🟢 Open" if count < MAX_SLOTS else "🔴 Full"
@@ -185,7 +177,6 @@ async def add_player_to_slot(interaction, slot_name):
         data["teams"][uid]["booked_slots"].append(slot_name)
     save_data(data)
 
-    # Assign Role
     role_name = SLOT_ROLES.get(slot_name)
     if role_name:
         role = await get_or_create_role(guild, role_name)
@@ -193,12 +184,10 @@ async def add_player_to_slot(interaction, slot_name):
             try: await interaction.user.add_roles(role)
             except: pass
 
-    # Update Table
     await refresh_table(guild, slot_name)
     return True
 
 async def perform_removal(guild, uid, slot_name):
-    """Shared function to remove data, remove role, and refresh table"""
     if uid in data["slots"][slot_name]:
         data["slots"][slot_name].remove(uid)
     
@@ -238,53 +227,65 @@ async def remove_all_slots_logic(interaction):
         await perform_removal(interaction.guild, uid, s)
     return True, "✅ All matches cancelled."
 
-# ================= 6. AUTO-RESET TASK (MIDNIGHT) =================
+# ================= 6. AUTO-RESET TASK (MIDNIGHT + 7 DAY CLEANUP) =================
 @tasks.loop(minutes=1)
 async def daily_reset_task():
-    # Calculate current time with offset (India Time = UTC + 5.5)
     utc_now = datetime.datetime.utcnow()
     local_now = utc_now + datetime.timedelta(hours=TIMEZONE_OFFSET)
     
-    # Check if it is Midnight (00:00)
     if local_now.hour == 0 and local_now.minute == 0:
         print("🕛 MIDNIGHT RESET: Cleaning up...")
         if not bot.guilds: return
         guild = bot.guilds[0]
 
-        # 1. Remove Roles & Clear Slot Lists
+        # A. MATCH & ROLE WIPE (Daily)
         for slot_name, uids in data["slots"].items():
             role_name = SLOT_ROLES.get(slot_name)
             role = discord.utils.get(guild.roles, name=role_name)
-            
             if role:
                 for uid in uids:
                     member = guild.get_member(int(uid))
                     if member:
                         try: await member.remove_roles(role)
                         except: pass
-            
-            data["slots"][slot_name] = [] # Wipe list
+            data["slots"][slot_name] = [] 
 
-        # 2. Clear Bookings
         for uid in data["teams"]:
             data["teams"][uid]["booked_slots"] = []
+
+        # B. 7-DAY DATA DELETION
+        # Loop through a copy of keys to avoid runtime error while deleting
+        uids_to_delete = []
+        for uid, info in data["teams"].items():
+            # Get timestamp, default to now if missing
+            reg_time_str = info.get("last_updated", utc_now.isoformat()) 
+            reg_time = datetime.datetime.fromisoformat(reg_time_str)
+            
+            # Calculate difference
+            if (utc_now - reg_time).days >= DATA_EXPIRY_DAYS:
+                uids_to_delete.append(uid)
         
+        # Delete old data
+        for uid in uids_to_delete:
+            del data["teams"][uid]
+            print(f"🗑️ Deleted expired data for User ID: {uid}")
+
         save_data(data)
 
-        # 3. Refresh Tables to show [ OPEN ]
+        # C. REFRESH TABLES
         for slot_name in SLOT_LIST_CHANNELS:
             await refresh_table(guild, slot_name)
             await asyncio.sleep(1)
 
-        # 4. Log and Unlock
+        # D. LOG
         log_ch = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if log_ch: await log_ch.send("🕛 **Daily Reset Complete.** All matches cleared.")
+        if log_ch: await log_ch.send("🕛 **Daily Reset & Cleanup Complete.**")
         
         global REGISTRATION_OPEN
         REGISTRATION_OPEN = True
 
 # ================= 7. VIEWS & MODALS =================
-class TeamModal(discord.ui.Modal, title="Team Registration"):
+class TeamModal(discord.ui.Modal, title="Update / New Team"):
     team = discord.ui.TextInput(label="Team Name", placeholder="Enter your team name")
     p1 = discord.ui.TextInput(label="Player 1 (IGL)", placeholder="IGN / Discord ID")
     p2 = discord.ui.TextInput(label="Player 2", placeholder="IGN", required=False)
@@ -293,19 +294,22 @@ class TeamModal(discord.ui.Modal, title="Team Registration"):
     
     async def on_submit(self, interaction: discord.Interaction):
         uid = str(interaction.user.id)
+        
+        # Overwrite existing data or create new
         data["teams"][uid] = {
             "team": self.team.value,
             "players": [self.p1.value, self.p2.value, self.p3.value, self.p4.value],
-            "booked_slots": []
+            "booked_slots": [],
+            "last_updated": datetime.datetime.utcnow().isoformat() # SAVE TIMESTAMP
         }
         save_data(data)
         
         log_channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
         if log_channel:
-            embed = discord.Embed(title="🆕 New Team Registered", color=discord.Color.blue())
+            embed = discord.Embed(title="🆕 Team Registered/Updated", color=discord.Color.blue())
             embed.add_field(name="Team", value=self.team.value)
             embed.add_field(name="Roster", value=f"{self.p1.value}, {self.p2.value}, {self.p3.value}, {self.p4.value}", inline=False)
-            embed.add_field(name="IGL", value=f"<@{uid}>")
+            embed.add_field(name="User", value=f"<@{uid}>")
             await log_channel.send(embed=embed)
 
         await interaction.response.send_message(
@@ -317,7 +321,7 @@ class TeamModal(discord.ui.Modal, title="Team Registration"):
 class SlotButton(discord.ui.Button):
     def __init__(self, slot):
         count = len(data["slots"][slot])
-        display_name = slot.replace("_", " ") # MATCH 1
+        display_name = slot.replace("_", " ") 
         label = f"{display_name} ({count}/{MAX_SLOTS})"
         style = discord.ButtonStyle.green if count < MAX_SLOTS else discord.ButtonStyle.red
         super().__init__(label=label, style=style, disabled=(count >= MAX_SLOTS))
@@ -362,6 +366,23 @@ class AutoClaimView(discord.ui.View):
         else:
             await interaction.response.send_message("❌ All matches are full!", ephemeral=True)
 
+# --- NEW: TEAM CHOICE VIEW (Old vs New) ---
+class TeamChoiceView(discord.ui.View):
+    def __init__(self, team_name):
+        super().__init__(timeout=60)
+        self.team_name = team_name
+
+    @discord.ui.button(label=f"🟢 Continue as", style=discord.ButtonStyle.success)
+    async def continue_old(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Update label dynamically isn't easy here, so we used a generic label + text in logic
+        # Just go straight to slots
+        await interaction.response.send_message(f"✅ Using team: **{self.team_name}**. Select Match:", view=SlotSelectView(), ephemeral=True)
+
+    @discord.ui.button(label="🔵 New / Update Team", style=discord.ButtonStyle.primary)
+    async def update_new(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Open Modal to overwrite data
+        await interaction.response.send_modal(TeamModal())
+
 class MainRegisterView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -369,9 +390,29 @@ class MainRegisterView(discord.ui.View):
     @discord.ui.button(label="📝 Register Team", style=discord.ButtonStyle.green, custom_id="reg_btn")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
+        
+        # 1. Check if user exists
         if uid in data["teams"]:
-             await interaction.response.send_message("✅ Team found! Select a Match:", view=SlotSelectView(), ephemeral=True)
+            # 2. Check Expiry (Double check logic just in case task hasn't run)
+            last_updated = data["teams"][uid].get("last_updated")
+            if last_updated:
+                reg_time = datetime.datetime.fromisoformat(last_updated)
+                if (datetime.datetime.utcnow() - reg_time).days >= DATA_EXPIRY_DAYS:
+                    # Too old, treat as new
+                    del data["teams"][uid]
+                    save_data(data)
+                    await interaction.response.send_modal(TeamModal())
+                    return
+
+            # 3. If Valid, Ask Question
+            team_name = data["teams"][uid]["team"]
+            await interaction.response.send_message(
+                f"⚠️ You are already registered as **{team_name}**.\nDo you want to continue or register a new team?", 
+                view=TeamChoiceView(team_name), 
+                ephemeral=True
+            )
         else:
+            # New User
             await interaction.response.send_modal(TeamModal())
 
 class CancelDropdown(discord.ui.Select):
@@ -440,33 +481,24 @@ async def on_ready():
     if not daily_reset_task.is_running():
         daily_reset_task.start()
 
-# --- ADMIN COMMAND: FORCE REMOVE ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def force_remove(ctx, match_name: str, slot_number: int):
-    """
-    Usage: !force_remove MATCH_1 5
-    (Removes the team at Slot 5 in Match 1)
-    """
     match_key = match_name.upper()
     if match_key not in SLOT_LIST_CHANNELS:
         await ctx.send(f"❌ Invalid Name. Use: `MATCH_1`, `MATCH_2`, `MATCH_3`, `MATCH_4`")
         return
-
     registered_uids = data["slots"].get(match_key, [])
     index = slot_number - 1 
     if index < 0 or index >= len(registered_uids):
         await ctx.send(f"❌ Slot number {slot_number} is empty.")
         return
-
     target_uid = registered_uids[index]
     await perform_removal(ctx.guild, target_uid, match_key)
-    
     team_name = data["teams"].get(target_uid, {}).get("team", "Unknown")
     await ctx.send(f"✅ **Admin Removed:** Team '{team_name}' from {match_key} (Slot {slot_number}).")
 
-# --- ADMIN SETUP COMMANDS ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
@@ -505,19 +537,15 @@ async def init_tables(ctx):
 async def notify_start(ctx, minutes: int, slot_name: str = None):
     await ctx.message.delete()
     target_slot = slot_name.upper() if slot_name else None
-    
     count = 0
     for s_name, channel_id in SLOT_LIST_CHANNELS.items():
         if target_slot and s_name != target_slot: continue
-        
         role_name = SLOT_ROLES.get(s_name)
         if not role_name: continue
-        
         role = discord.utils.get(ctx.guild.roles, name=role_name)
         channel = ctx.guild.get_channel(channel_id)
         room_channel_id = ROOM_CHANNELS.get(s_name)
         room_channel = ctx.guild.get_channel(room_channel_id) if room_channel_id else None
-
         if role and channel:
             room_link = room_channel.mention if room_channel else "the room channel"
             await channel.send(
