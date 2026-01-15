@@ -1,8 +1,9 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import json
 import os
 import asyncio
+import datetime
 import keep_alive
 
 # ================= 1. CONFIGURATION =================
@@ -14,33 +15,34 @@ REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
 
-# LIVE TABLES: The bot will update the list in these channels
+# RENAMED TO MATCH 1, 2, 3, 4
 SLOT_LIST_CHANNELS = {
-    "SLOT_1": 1459460237437435999,
-    "SLOT_2": 1459471324593389725,
-    "SLOT_3": 1459471494785531965,
-    "SLOT_4": 1459472478651945070
+    "MATCH_1": 1459460237437435999,
+    "MATCH_2": 1459471324593389725,
+    "MATCH_3": 1459471494785531965,
+    "MATCH_4": 1459472478651945070
 }
 
-# PRIVATE ROOMS: Where ID/Pass is sent
+# PRIVATE ROOM CHANNELS (For ID/Pass)
 ROOM_CHANNELS = {
-    "SLOT_1": 1458788771716792486,
-    "SLOT_2": 1459772021448904822,
-    "SLOT_3": 1459772074112454750,
-    "SLOT_4": 1459772130232373512
+    "MATCH_1": 1458788771716792486,
+    "MATCH_2": 1459772021448904822,
+    "MATCH_3": 1459772074112454750,
+    "MATCH_4": 1459772130232373512
 }
 
-# ROLES: Exact names of roles to assign
+# ROLE NAMES (Must match your Discord Server roles exactly)
 SLOT_ROLES = {
-    "SLOT_1": "Slot 1 Player",
-    "SLOT_2": "Slot 2 Player",
-    "SLOT_3": "Slot 3 Player",
-    "SLOT_4": "Slot 4 Player"
+    "MATCH_1": "Match 1 Player",
+    "MATCH_2": "Match 2 Player",
+    "MATCH_3": "Match 3 Player",
+    "MATCH_4": "Match 4 Player"
 }
 
 MAX_SLOTS = 16
 DATA_FILE = "data.json"
 REGISTRATION_OPEN = True
+TIMEZONE_OFFSET = 5.5 # India Standard Time
 
 # ================= 2. DATA HANDLING =================
 def load_data():
@@ -58,6 +60,17 @@ def load_data():
         data = json.load(f)
         if "table_messages" not in data:
             data["table_messages"] = {}
+        
+        # MIGRATION: Convert old "SLOT" data to "MATCH" data automatically
+        if "SLOT_1" in data["slots"]:
+            print("🔄 Migrating old data to new MATCH format...")
+            new_slots = {}
+            for k, v in data["slots"].items():
+                new_key = k.replace("SLOT", "MATCH")
+                new_slots[new_key] = v
+            data["slots"] = new_slots
+            save_data(data)
+            
         return data
 
 def save_data(data):
@@ -98,7 +111,6 @@ async def setup_channel_perms(guild):
 
 # ================= 4. LIVE TABLE REFRESH =================
 async def refresh_table(guild, slot_name):
-    """Updates the single pinned message in the slot channel."""
     channel_id = SLOT_LIST_CHANNELS.get(slot_name)
     if not channel_id: return
     channel = guild.get_channel(channel_id)
@@ -106,7 +118,7 @@ async def refresh_table(guild, slot_name):
 
     registered_uids = data["slots"].get(slot_name, [])
     
-    # Create the Table Strings
+    # Header
     table_lines = [f"{'NO.':<3} | {'TEAM NAME'}", "-" * 30]
     
     for i in range(MAX_SLOTS):
@@ -114,7 +126,6 @@ async def refresh_table(guild, slot_name):
         if i < len(registered_uids):
             uid = registered_uids[i]
             team_name = data["teams"].get(uid, {}).get("team", "Unknown")
-            # Truncate long names to prevent breaking layout
             team_name = (team_name[:18] + '..') if len(team_name) > 18 else team_name
             table_lines.append(f"{slot_num:02d}  | {team_name}")
         else:
@@ -122,7 +133,7 @@ async def refresh_table(guild, slot_name):
 
     tabular_data = "\n".join(table_lines)
     
-    display_name = slot_name.replace("_", " ")
+    display_name = slot_name.replace("_", " ") # "MATCH 1"
     count = len(registered_uids)
     color = discord.Color.green() if count < MAX_SLOTS else discord.Color.red()
     status = "🟢 Open" if count < MAX_SLOTS else "🔴 Full"
@@ -135,7 +146,6 @@ async def refresh_table(guild, slot_name):
     embed.add_field(name="Registered Teams", value=f"```text\n{tabular_data}\n```", inline=False)
     embed.set_footer(text="Updates automatically • Do not type here")
 
-    # Update Logic
     msg_id = data["table_messages"].get(slot_name)
     message = None
     if msg_id:
@@ -151,7 +161,6 @@ async def refresh_table(guild, slot_name):
         save_data(data)
 
 # ================= 5. CORE LOGIC (ADD/REMOVE) =================
-
 async def add_player_to_slot(interaction, slot_name):
     uid = str(interaction.user.id)
     guild = interaction.guild
@@ -167,7 +176,7 @@ async def add_player_to_slot(interaction, slot_name):
         await interaction.response.send_message(f"⚠️ You are already in **{slot_name}**.", ephemeral=True)
         return False
 
-    # 1. Save Data
+    # Save Data
     data["slots"][slot_name].append(uid)
     if "booked_slots" not in data["teams"][uid]:
         data["teams"][uid]["booked_slots"] = []
@@ -176,7 +185,7 @@ async def add_player_to_slot(interaction, slot_name):
         data["teams"][uid]["booked_slots"].append(slot_name)
     save_data(data)
 
-    # 2. Assign Role
+    # Assign Role
     role_name = SLOT_ROLES.get(slot_name)
     if role_name:
         role = await get_or_create_role(guild, role_name)
@@ -184,37 +193,39 @@ async def add_player_to_slot(interaction, slot_name):
             try: await interaction.user.add_roles(role)
             except: pass
 
-    # 3. Update Visual Table
+    # Update Table
     await refresh_table(guild, slot_name)
     return True
 
+async def perform_removal(guild, uid, slot_name):
+    """Shared function to remove data, remove role, and refresh table"""
+    if uid in data["slots"][slot_name]:
+        data["slots"][slot_name].remove(uid)
+    
+    if uid in data["teams"] and slot_name in data["teams"][uid]["booked_slots"]:
+        data["teams"][uid]["booked_slots"].remove(slot_name)
+    
+    save_data(data)
+
+    role_name = SLOT_ROLES.get(slot_name)
+    if role_name:
+        role = discord.utils.get(guild.roles, name=role_name)
+        member = guild.get_member(int(uid))
+        if role and member:
+            try: await member.remove_roles(role)
+            except: pass
+
+    await refresh_table(guild, slot_name)
+
 async def remove_single_slot_logic(interaction, slot_to_remove):
     uid = str(interaction.user.id)
-    guild = interaction.guild
-    
     if uid not in data["teams"]: return False, "No team data."
     booked = data["teams"][uid].get("booked_slots", [])
     
     if slot_to_remove not in booked:
         return False, "You don't own this slot."
 
-    # 1. Remove Data
-    if uid in data["slots"][slot_to_remove]:
-        data["slots"][slot_to_remove].remove(uid)
-    
-    data["teams"][uid]["booked_slots"].remove(slot_to_remove)
-    save_data(data)
-
-    # 2. Remove Role
-    role_name = SLOT_ROLES.get(slot_to_remove)
-    if role_name:
-        role = discord.utils.get(guild.roles, name=role_name)
-        if role:
-            try: await interaction.user.remove_roles(role)
-            except: pass
-
-    # 3. Update Visual Table
-    await refresh_table(guild, slot_to_remove)
+    await perform_removal(interaction.guild, uid, slot_to_remove)
     return True, f"✅ Removed from **{slot_to_remove}**."
 
 async def remove_all_slots_logic(interaction):
@@ -224,15 +235,57 @@ async def remove_all_slots_logic(interaction):
 
     booked = list(data["teams"][uid]["booked_slots"])
     for s in booked:
-        await remove_single_slot_logic(interaction, s)
-    return True, "✅ All slots cancelled."
+        await perform_removal(interaction.guild, uid, s)
+    return True, "✅ All matches cancelled."
 
-# ================= 6. VIEWS & MODALS =================
+# ================= 6. AUTO-RESET TASK (MIDNIGHT) =================
+@tasks.loop(minutes=1)
+async def daily_reset_task():
+    # Calculate current time with offset (India Time = UTC + 5.5)
+    utc_now = datetime.datetime.utcnow()
+    local_now = utc_now + datetime.timedelta(hours=TIMEZONE_OFFSET)
+    
+    # Check if it is Midnight (00:00)
+    if local_now.hour == 0 and local_now.minute == 0:
+        print("🕛 MIDNIGHT RESET: Cleaning up...")
+        if not bot.guilds: return
+        guild = bot.guilds[0]
 
+        # 1. Remove Roles & Clear Slot Lists
+        for slot_name, uids in data["slots"].items():
+            role_name = SLOT_ROLES.get(slot_name)
+            role = discord.utils.get(guild.roles, name=role_name)
+            
+            if role:
+                for uid in uids:
+                    member = guild.get_member(int(uid))
+                    if member:
+                        try: await member.remove_roles(role)
+                        except: pass
+            
+            data["slots"][slot_name] = [] # Wipe list
+
+        # 2. Clear Bookings
+        for uid in data["teams"]:
+            data["teams"][uid]["booked_slots"] = []
+        
+        save_data(data)
+
+        # 3. Refresh Tables to show [ OPEN ]
+        for slot_name in SLOT_LIST_CHANNELS:
+            await refresh_table(guild, slot_name)
+            await asyncio.sleep(1)
+
+        # 4. Log and Unlock
+        log_ch = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if log_ch: await log_ch.send("🕛 **Daily Reset Complete.** All matches cleared.")
+        
+        global REGISTRATION_OPEN
+        REGISTRATION_OPEN = True
+
+# ================= 7. VIEWS & MODALS =================
 class TeamModal(discord.ui.Modal, title="Team Registration"):
     team = discord.ui.TextInput(label="Team Name", placeholder="Enter your team name")
-    
-    # 4 Players Inputs
     p1 = discord.ui.TextInput(label="Player 1 (IGL)", placeholder="IGN / Discord ID")
     p2 = discord.ui.TextInput(label="Player 2", placeholder="IGN", required=False)
     p3 = discord.ui.TextInput(label="Player 3", placeholder="IGN", required=False)
@@ -240,8 +293,6 @@ class TeamModal(discord.ui.Modal, title="Team Registration"):
     
     async def on_submit(self, interaction: discord.Interaction):
         uid = str(interaction.user.id)
-        
-        # Save all 4 players
         data["teams"][uid] = {
             "team": self.team.value,
             "players": [self.p1.value, self.p2.value, self.p3.value, self.p4.value],
@@ -249,17 +300,16 @@ class TeamModal(discord.ui.Modal, title="Team Registration"):
         }
         save_data(data)
         
-        # Log to Admin Channel
         log_channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
         if log_channel:
             embed = discord.Embed(title="🆕 New Team Registered", color=discord.Color.blue())
-            embed.add_field(name="Team Name", value=self.team.value)
+            embed.add_field(name="Team", value=self.team.value)
             embed.add_field(name="Roster", value=f"{self.p1.value}, {self.p2.value}, {self.p3.value}, {self.p4.value}", inline=False)
             embed.add_field(name="IGL", value=f"<@{uid}>")
             await log_channel.send(embed=embed)
 
         await interaction.response.send_message(
-            f"✅ Team **{self.team.value}** Saved! Now select a slot:", 
+            f"✅ Team **{self.team.value}** Saved! Select a Match:", 
             view=SlotSelectView(), 
             ephemeral=True
         )
@@ -267,7 +317,8 @@ class TeamModal(discord.ui.Modal, title="Team Registration"):
 class SlotButton(discord.ui.Button):
     def __init__(self, slot):
         count = len(data["slots"][slot])
-        label = f"{slot} ({count}/{MAX_SLOTS})"
+        display_name = slot.replace("_", " ") # MATCH 1
+        label = f"{display_name} ({count}/{MAX_SLOTS})"
         style = discord.ButtonStyle.green if count < MAX_SLOTS else discord.ButtonStyle.red
         super().__init__(label=label, style=style, disabled=(count >= MAX_SLOTS))
         self.slot = slot
@@ -309,7 +360,7 @@ class AutoClaimView(discord.ui.View):
             if success:
                 await interaction.response.send_message(f"✅ Auto-Assigned to **{assigned}**!", ephemeral=True)
         else:
-            await interaction.response.send_message("❌ All slots are full!", ephemeral=True)
+            await interaction.response.send_message("❌ All matches are full!", ephemeral=True)
 
 class MainRegisterView(discord.ui.View):
     def __init__(self):
@@ -319,7 +370,7 @@ class MainRegisterView(discord.ui.View):
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
         if uid in data["teams"]:
-             await interaction.response.send_message("✅ Team found! Select a slot:", view=SlotSelectView(), ephemeral=True)
+             await interaction.response.send_message("✅ Team found! Select a Match:", view=SlotSelectView(), ephemeral=True)
         else:
             await interaction.response.send_modal(TeamModal())
 
@@ -327,9 +378,10 @@ class CancelDropdown(discord.ui.Select):
     def __init__(self, booked_slots):
         options = []
         for slot in booked_slots:
-            options.append(discord.SelectOption(label=f"Cancel {slot}", value=slot, emoji="🗑️"))
-        options.append(discord.SelectOption(label="Cancel ALL", value="ALL", emoji="❌"))
-        super().__init__(placeholder="Select slot to cancel...", min_values=1, max_values=1, options=options)
+            display_name = slot.replace("_", " ")
+            options.append(discord.SelectOption(label=f"Leave {display_name}", value=slot, emoji="🗑️"))
+        options.append(discord.SelectOption(label="Leave ALL Matches", value="ALL", emoji="❌"))
+        super().__init__(placeholder="Select match to leave...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "ALL":
@@ -342,16 +394,16 @@ class CancelAndClaimView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🗑️ Cancel My Slot", style=discord.ButtonStyle.danger, custom_id="cancel_slot_btn")
+    @discord.ui.button(label="🗑️ Leave Match", style=discord.ButtonStyle.danger, custom_id="cancel_slot_btn")
     async def cancel_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
         if uid not in data["teams"] or not data["teams"][uid].get("booked_slots"):
-             await interaction.response.send_message("⚠️ You have no active slots.", ephemeral=True)
+             await interaction.response.send_message("⚠️ You have no active matches.", ephemeral=True)
              return
         booked = data["teams"][uid]["booked_slots"]
-        await interaction.response.send_message("Select slot to cancel:", view=discord.ui.View().add_item(CancelDropdown(booked)), ephemeral=True)
+        await interaction.response.send_message("Select match to leave:", view=discord.ui.View().add_item(CancelDropdown(booked)), ephemeral=True)
 
-    @discord.ui.button(label="♻️ Claim Open Slot", style=discord.ButtonStyle.primary, custom_id="claim_open_btn")
+    @discord.ui.button(label="♻️ Join Open Match", style=discord.ButtonStyle.primary, custom_id="claim_open_btn")
     async def claim_open(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not REGISTRATION_OPEN:
             await interaction.response.send_message("⛔ **Claims Closed.**", ephemeral=True)
@@ -362,7 +414,7 @@ class CancelAndClaimView(discord.ui.View):
             return
         await interaction.response.send_message("✅ Checking availability...", view=SlotSelectView(), ephemeral=True)
 
-# ================= 7. BOT & ADMIN COMMANDS =================
+# ================= 8. ADMIN COMMANDS =================
 class SlotBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.all())
@@ -385,14 +437,42 @@ def is_admin_channel():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    if not daily_reset_task.is_running():
+        daily_reset_task.start()
 
+# --- ADMIN COMMAND: FORCE REMOVE ---
+@bot.command()
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def force_remove(ctx, match_name: str, slot_number: int):
+    """
+    Usage: !force_remove MATCH_1 5
+    (Removes the team at Slot 5 in Match 1)
+    """
+    match_key = match_name.upper()
+    if match_key not in SLOT_LIST_CHANNELS:
+        await ctx.send(f"❌ Invalid Name. Use: `MATCH_1`, `MATCH_2`, `MATCH_3`, `MATCH_4`")
+        return
+
+    registered_uids = data["slots"].get(match_key, [])
+    index = slot_number - 1 
+    if index < 0 or index >= len(registered_uids):
+        await ctx.send(f"❌ Slot number {slot_number} is empty.")
+        return
+
+    target_uid = registered_uids[index]
+    await perform_removal(ctx.guild, target_uid, match_key)
+    
+    team_name = data["teams"].get(target_uid, {}).get("team", "Unknown")
+    await ctx.send(f"✅ **Admin Removed:** Team '{team_name}' from {match_key} (Slot {slot_number}).")
+
+# --- ADMIN SETUP COMMANDS ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def setup(ctx):
-    """Restores Register, AutoClaim, and Cancel Buttons."""
     await ctx.message.delete()
-    msg = await ctx.send("⚙️ **Configuring Roles & Channels...**")
+    msg = await ctx.send("⚙️ **Configuring...**")
     await setup_channel_perms(ctx.guild)
     
     reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
@@ -404,7 +484,7 @@ async def setup(ctx):
     can_ch = ctx.guild.get_channel(CANCEL_CLAIM_CHANNEL_ID)
     if can_ch:
         await can_ch.purge(limit=5)
-        embed = discord.Embed(title="Slot Management", description="Cancel your booking or claim open slots.", color=discord.Color.orange())
+        embed = discord.Embed(title="Match Management", description="Leave your match or join open spots.", color=discord.Color.orange())
         await can_ch.send(embed=embed, view=CancelAndClaimView())
 
     await msg.edit(content="✅ **Setup Complete!**")
@@ -413,8 +493,7 @@ async def setup(ctx):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def init_tables(ctx):
-    """Creates the Live Tables in all slot channels (Run Once)."""
-    await ctx.send("🔄 Initializing Live Tables in all slot channels...")
+    await ctx.send("🔄 Initializing Live Tables...")
     for slot_name in SLOT_LIST_CHANNELS:
         await refresh_table(ctx.guild, slot_name)
         await asyncio.sleep(1) 
@@ -424,20 +503,18 @@ async def init_tables(ctx):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def notify_start(ctx, minutes: int, slot_name: str = None):
-    """Sends 'Match Starting in X mins' to Room channels."""
     await ctx.message.delete()
     target_slot = slot_name.upper() if slot_name else None
     
     count = 0
     for s_name, channel_id in SLOT_LIST_CHANNELS.items():
         if target_slot and s_name != target_slot: continue
-
+        
         role_name = SLOT_ROLES.get(s_name)
         if not role_name: continue
         
         role = discord.utils.get(ctx.guild.roles, name=role_name)
         channel = ctx.guild.get_channel(channel_id)
-        
         room_channel_id = ROOM_CHANNELS.get(s_name)
         room_channel = ctx.guild.get_channel(room_channel_id) if room_channel_id else None
 
@@ -449,7 +526,6 @@ async def notify_start(ctx, minutes: int, slot_name: str = None):
                 f"Please check {room_link} for ID & Password."
             )
             count += 1
-            
     await ctx.send(f"✅ Notification sent to {count} channels.", delete_after=5)
 
 @bot.command()
