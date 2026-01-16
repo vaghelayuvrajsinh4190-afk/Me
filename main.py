@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands, tasks
+from discord import ui # Required for the new verification views
 import json
 import os
 import asyncio
@@ -14,6 +15,7 @@ ADMIN_COMMAND_CHANNEL_ID = 1459806817734361282
 REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
+VERIFY_CHANNEL_ID = 1461666929516347453  # Channel for the Verify Button
 
 # MATCH CHANNELS
 SLOT_LIST_CHANNELS = {
@@ -39,8 +41,10 @@ SLOT_ROLES = {
     "MATCH_4": "Match 4 Player"
 }
 
+VERIFY_ROLE_NAME = "Verified Team" # The role given by the verify button
+
 # --- SETTINGS ---
-MAX_SLOTS = 16  # UPDATED to 16
+MAX_SLOTS = 16
 DATA_FILE = "data.json"
 REGISTRATION_OPEN = True
 TIMEZONE_OFFSET = 5.5 # India Standard Time
@@ -85,6 +89,7 @@ async def get_or_create_role(guild, role_name):
     return role
 
 async def setup_channel_perms(guild):
+    # Setup Match Roles
     for slot_name, role_name in SLOT_ROLES.items():
         role = await get_or_create_role(guild, role_name)
         if not role: continue
@@ -153,7 +158,7 @@ async def refresh_table(guild, slot_name):
         data["table_messages"][slot_name] = message.id
         save_data(data)
 
-# ================= 5. CORE LOGIC (ADD/REMOVE) =================
+# ================= 5. CORE LOGIC (SLOTS ADD/REMOVE) =================
 async def add_player_to_slot(interaction, slot_name):
     uid = str(interaction.user.id)
     guild = interaction.guild
@@ -255,18 +260,13 @@ async def daily_reset_task():
             data["teams"][uid]["booked_slots"] = []
 
         # B. 7-DAY DATA DELETION
-        # Loop through a copy of keys to avoid runtime error while deleting
         uids_to_delete = []
         for uid, info in data["teams"].items():
-            # Get timestamp, default to now if missing
             reg_time_str = info.get("last_updated", utc_now.isoformat()) 
             reg_time = datetime.datetime.fromisoformat(reg_time_str)
-            
-            # Calculate difference
             if (utc_now - reg_time).days >= DATA_EXPIRY_DAYS:
                 uids_to_delete.append(uid)
         
-        # Delete old data
         for uid in uids_to_delete:
             del data["teams"][uid]
             print(f"🗑️ Deleted expired data for User ID: {uid}")
@@ -285,7 +285,70 @@ async def daily_reset_task():
         global REGISTRATION_OPEN
         REGISTRATION_OPEN = True
 
-# ================= 7. VIEWS & MODALS =================
+# ================= 7. VERIFICATION SYSTEM (NEW FEATURES) =================
+class PlayerSelect(ui.UserSelect):
+    def __init__(self, team_name):
+        self.team_name = team_name
+        # Force them to select exactly 4 players
+        super().__init__(placeholder="Select the 4 Players...", min_values=4, max_values=4)
+
+    async def callback(self, interaction: discord.Interaction):
+        # 1. Get the Role
+        role = discord.utils.get(interaction.guild.roles, name=VERIFY_ROLE_NAME)
+        if not role:
+            await interaction.response.send_message(f"❌ Error: Role '{VERIFY_ROLE_NAME}' not found.", ephemeral=True)
+            return
+
+        # 2. Assign Roles
+        members = self.values # List of selected members
+        assigned_count = 0
+        
+        # Defer interaction (give bot time to process 4 roles)
+        await interaction.response.defer(ephemeral=True)
+
+        for member in members:
+            try:
+                await member.add_roles(role)
+                assigned_count += 1
+            except discord.Forbidden:
+                await interaction.followup.send("❌ Error: Bot does not have permission to assign roles. Check hierarchy.", ephemeral=True)
+                return
+
+        # 3. Success Message (Hidden)
+        player_names = ", ".join([m.mention for m in members])
+        embed = discord.Embed(
+            title=f"✅ Team Verified: {self.team_name}",
+            description=f"**Role Given:** {role.mention}\n**Players:** {player_names}",
+            color=discord.Color.green()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+class PlayerSelectView(ui.View):
+    def __init__(self, team_name):
+        super().__init__(timeout=60)
+        self.add_item(PlayerSelect(team_name))
+
+class TeamNameModal(ui.Modal, title="Step 1: Team Name"):
+    name_input = ui.TextInput(label="Enter Team Name", placeholder="e.g. Galaxy Crows", max_length=50)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        team_name = self.name_input.value
+        # Reply with the User Select Menu
+        await interaction.response.send_message(
+            f"Please select the **4 players** for **{team_name}** below:", 
+            view=PlayerSelectView(team_name), 
+            ephemeral=True
+        )
+
+class PersistentVerifyView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None) # Timeout=None makes it persistent
+
+    @ui.button(label="Verify Team", style=discord.ButtonStyle.green, emoji="🛡️", custom_id="verify_btn_1")
+    async def verify_button(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(TeamNameModal())
+
+# ================= 8. SLOT VIEWS & MODALS (OLD FEATURES) =================
 class TeamModal(discord.ui.Modal, title="Update / New Team"):
     team = discord.ui.TextInput(label="Team Name", placeholder="Enter your team name")
     p1 = discord.ui.TextInput(label="Player 1 (IGL)", placeholder="IGN / Discord ID")
@@ -301,7 +364,7 @@ class TeamModal(discord.ui.Modal, title="Update / New Team"):
             "team": self.team.value,
             "players": [self.p1.value, self.p2.value, self.p3.value, self.p4.value],
             "booked_slots": [],
-            "last_updated": datetime.datetime.utcnow().isoformat() # SAVE TIMESTAMP
+            "last_updated": datetime.datetime.utcnow().isoformat()
         }
         save_data(data)
         
@@ -367,7 +430,6 @@ class AutoClaimView(discord.ui.View):
         else:
             await interaction.response.send_message("❌ All matches are full!", ephemeral=True)
 
-# --- NEW: TEAM CHOICE VIEW (Old vs New) ---
 class TeamChoiceView(discord.ui.View):
     def __init__(self, team_name):
         super().__init__(timeout=60)
@@ -375,13 +437,10 @@ class TeamChoiceView(discord.ui.View):
 
     @discord.ui.button(label=f"🟢 Continue as", style=discord.ButtonStyle.success)
     async def continue_old(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Update label dynamically isn't easy here, so we used a generic label + text in logic
-        # Just go straight to slots
         await interaction.response.send_message(f"✅ Using team: **{self.team_name}**. Select Match:", view=SlotSelectView(), ephemeral=True)
 
     @discord.ui.button(label="🔵 New / Update Team", style=discord.ButtonStyle.primary)
     async def update_new(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Open Modal to overwrite data
         await interaction.response.send_modal(TeamModal())
 
 class MainRegisterView(discord.ui.View):
@@ -391,21 +450,15 @@ class MainRegisterView(discord.ui.View):
     @discord.ui.button(label="📝 Register Team", style=discord.ButtonStyle.green, custom_id="reg_btn")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
-        
-        # 1. Check if user exists
         if uid in data["teams"]:
-            # 2. Check Expiry (Double check logic just in case task hasn't run)
             last_updated = data["teams"][uid].get("last_updated")
             if last_updated:
                 reg_time = datetime.datetime.fromisoformat(last_updated)
                 if (datetime.datetime.utcnow() - reg_time).days >= DATA_EXPIRY_DAYS:
-                    # Too old, treat as new
                     del data["teams"][uid]
                     save_data(data)
                     await interaction.response.send_modal(TeamModal())
                     return
-
-            # 3. If Valid, Ask Question
             team_name = data["teams"][uid]["team"]
             await interaction.response.send_message(
                 f"⚠️ You are already registered as **{team_name}**.\nDo you want to continue or register a new team?", 
@@ -413,7 +466,6 @@ class MainRegisterView(discord.ui.View):
                 ephemeral=True
             )
         else:
-            # New User
             await interaction.response.send_modal(TeamModal())
 
 class CancelDropdown(discord.ui.Select):
@@ -456,15 +508,18 @@ class CancelAndClaimView(discord.ui.View):
             return
         await interaction.response.send_message("✅ Checking availability...", view=SlotSelectView(), ephemeral=True)
 
-# ================= 8. ADMIN COMMANDS =================
+# ================= 9. BOT CLASS & ADMIN COMMANDS =================
 class SlotBot(commands.Bot):
     def __init__(self):
+        # Intents.all() handles both 'members' and 'message_content'
         super().__init__(command_prefix="!", intents=discord.Intents.all())
     
     async def setup_hook(self):
+        # Add all Views here so they persist after restart
         self.add_view(MainRegisterView())
         self.add_view(AutoClaimView())
         self.add_view(CancelAndClaimView())
+        self.add_view(PersistentVerifyView()) # Added the verification view
 
 bot = SlotBot()
 
@@ -482,6 +537,24 @@ async def on_ready():
     if not daily_reset_task.is_running():
         daily_reset_task.start()
 
+# --- VERIFY SETUP COMMAND ---
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setup_verify(ctx):
+    """Posts the Verification Button"""
+    # Check if correct channel (optional, based on config)
+    if ctx.channel.id != VERIFY_CHANNEL_ID:
+        await ctx.send(f"⚠️ Warning: This is not the configured VERIFY_CHANNEL ({VERIFY_CHANNEL_ID}).")
+    
+    embed = discord.Embed(
+        title="🛡️ Team Verification",
+        description="Click the button below to verify your squad and unlock the registration channel.",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed, view=PersistentVerifyView())
+    await ctx.message.delete()
+
+# --- SLOT ADMIN COMMANDS ---
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
