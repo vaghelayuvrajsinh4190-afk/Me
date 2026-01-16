@@ -39,7 +39,8 @@ SLOT_ROLES = {
     "MATCH_4": "Match 4 Player"
 }
 
-MAX_SLOTS = 16
+# --- SETTINGS ---
+MAX_SLOTS = 16  # UPDATED to 16
 DATA_FILE = "data.json"
 REGISTRATION_OPEN = True
 TIMEZONE_OFFSET = 5.5 # India Standard Time
