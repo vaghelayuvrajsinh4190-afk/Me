@@ -16,6 +16,7 @@ REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
 VERIFY_CHANNEL_ID = 1461666929516347453
+VERIFIED_TEAM_LOG_ID = 1466725299675856947 # <--- NEW LOG CHANNEL
 
 # MATCH CHANNELS
 SLOT_LIST_CHANNELS = {
@@ -107,6 +108,36 @@ async def setup_channel_perms(guild):
                 }
                 await ch.edit(overwrites=overwrites)
                 print(f"🔒 Locked channel {ch.name} to role {role.name}")
+
+def check_duplicates(current_uid, new_team_name, new_players):
+    """
+    Checks if team name or player names already exist in database.
+    Returns: (bool, error_message)
+    """
+    new_team_clean = new_team_name.strip().lower()
+    new_players_clean = [p.strip().lower() for p in new_players if p.strip()]
+
+    # 1. Check for duplicates within the current submission form
+    if len(new_players_clean) != len(set(new_players_clean)):
+        return True, "❌ You entered the same player name twice in this form."
+
+    for uid, info in data["teams"].items():
+        # Skip checking against the user's own previous data if they are updating
+        if uid == current_uid:
+            continue
+
+        # 2. Check Team Name Uniqueness
+        existing_team = info.get("team", "").strip().lower()
+        if existing_team == new_team_clean:
+            return True, f"❌ Team Name **'{new_team_name}'** is already taken!"
+
+        # 3. Check Player Name Uniqueness
+        existing_players = [p.strip().lower() for p in info.get("players", [])]
+        for np in new_players_clean:
+            if np in existing_players:
+                return True, f"❌ Player Name **'{np}'** is already registered in another team!"
+
+    return False, ""
 
 # ================= 4. LIVE TABLE REFRESH =================
 async def refresh_table(guild, slot_name):
@@ -294,17 +325,34 @@ class PlayerSelect(ui.UserSelect):
         members = self.values
         await interaction.response.defer(ephemeral=True)
 
+        member_details = []
         for member in members:
             try:
                 await member.add_roles(role)
+                member_details.append(f"• {member.mention} (`{member.name}`)")
             except discord.Forbidden:
                 await interaction.followup.send("❌ Error: Check Bot permissions.", ephemeral=True)
                 return
 
-        player_names = ", ".join([m.mention for m in members])
+        player_names_str = "\n".join(member_details)
+
+        # 1. Send Log to Verified Channel
+        log_channel = interaction.guild.get_channel(VERIFIED_TEAM_LOG_ID)
+        if log_channel:
+            log_embed = discord.Embed(
+                title="🛡️ New Team Verified",
+                color=discord.Color.gold(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            log_embed.add_field(name="Team Name", value=self.team_name, inline=False)
+            log_embed.add_field(name="Verified Players", value=player_names_str, inline=False)
+            log_embed.set_footer(text=f"Verified by {interaction.user.name}")
+            await log_channel.send(embed=log_embed)
+
+        # 2. Confirmation to User
         embed = discord.Embed(
             title=f"✅ Team Verified: {self.team_name}",
-            description=f"**Role Given:** {role.mention}\n**Players:** {player_names}",
+            description=f"**Role Given:** {role.mention}\n**Players:**\n{player_names_str}",
             color=discord.Color.green()
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -343,9 +391,19 @@ class TeamModal(discord.ui.Modal, title="Update / New Team"):
     
     async def on_submit(self, interaction: discord.Interaction):
         uid = str(interaction.user.id)
+        
+        # --- UNIQUENESS CHECK START ---
+        players_input = [self.p1.value, self.p2.value, self.p3.value, self.p4.value]
+        is_duplicate, error_msg = check_duplicates(uid, self.team.value, players_input)
+        
+        if is_duplicate:
+            await interaction.response.send_message(error_msg, ephemeral=True)
+            return
+        # --- UNIQUENESS CHECK END ---
+
         data["teams"][uid] = {
             "team": self.team.value,
-            "players": [self.p1.value, self.p2.value, self.p3.value, self.p4.value],
+            "players": [p for p in players_input if p], # Save only non-empty players
             "booked_slots": [],
             "last_updated": datetime.datetime.utcnow().isoformat()
         }
