@@ -16,7 +16,7 @@ REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
 VERIFY_CHANNEL_ID = 1461666929516347453
-VERIFIED_TEAM_LOG_ID = 1466725299675856947 # <--- NEW LOG CHANNEL
+VERIFIED_TEAM_LOG_ID = 1466725299675856947 
 
 # MATCH CHANNELS
 SLOT_LIST_CHANNELS = {
@@ -111,27 +111,23 @@ async def setup_channel_perms(guild):
 
 def check_duplicates(current_uid, new_team_name, new_players):
     """
-    Checks if team name or player names already exist in database.
-    Returns: (bool, error_message)
+    Checks if team name or player names already exist in database (Registration).
     """
     new_team_clean = new_team_name.strip().lower()
     new_players_clean = [p.strip().lower() for p in new_players if p.strip()]
 
-    # 1. Check for duplicates within the current submission form
+    # 1. Check for duplicates within the current submission
     if len(new_players_clean) != len(set(new_players_clean)):
         return True, "❌ You entered the same player name twice in this form."
 
     for uid, info in data["teams"].items():
-        # Skip checking against the user's own previous data if they are updating
         if uid == current_uid:
             continue
 
-        # 2. Check Team Name Uniqueness
         existing_team = info.get("team", "").strip().lower()
         if existing_team == new_team_clean:
-            return True, f"❌ Team Name **'{new_team_name}'** is already taken!"
+            return True, f"❌ Team Name **'{new_team_name}'** is already taken by another squad!"
 
-        # 3. Check Player Name Uniqueness
         existing_players = [p.strip().lower() for p in info.get("players", [])]
         for np in new_players_clean:
             if np in existing_players:
@@ -203,7 +199,6 @@ async def add_player_to_slot(interaction, slot_name):
         await interaction.response.send_message(f"⚠️ You are already in **{slot_name}**.", ephemeral=True)
         return False
 
-    # Save Data
     data["slots"][slot_name].append(uid)
     if "booked_slots" not in data["teams"][uid]:
         data["teams"][uid]["booked_slots"] = []
@@ -310,7 +305,7 @@ async def daily_reset_task():
         global REGISTRATION_OPEN
         REGISTRATION_OPEN = True
 
-# ================= 7. VERIFICATION SYSTEM =================
+# ================= 7. VERIFICATION SYSTEM (UPDATED) =================
 class PlayerSelect(ui.UserSelect):
     def __init__(self, team_name):
         self.team_name = team_name
@@ -322,7 +317,25 @@ class PlayerSelect(ui.UserSelect):
             await interaction.response.send_message(f"❌ Error: Role '{VERIFY_ROLE_NAME}' not found.", ephemeral=True)
             return
 
-        members = self.values
+        members = self.values # List of selected Discord Members
+
+        # --- 🔴 STOP IF ALREADY VERIFIED ---
+        # This loop checks if any of the selected members already have the role.
+        already_verified = []
+        for member in members:
+            if role in member.roles:
+                already_verified.append(member.mention)
+        
+        if already_verified:
+            # If anyone is found, STOP everything.
+            player_list = ", ".join(already_verified)
+            await interaction.response.send_message(
+                f"⛔ **Verification Failed!**\nThe following players are already verified:\n{player_list}\n\nThey cannot be verified again.", 
+                ephemeral=True
+            )
+            return
+        # -----------------------------------
+
         await interaction.response.defer(ephemeral=True)
 
         member_details = []
@@ -331,7 +344,7 @@ class PlayerSelect(ui.UserSelect):
                 await member.add_roles(role)
                 member_details.append(f"• {member.mention} (`{member.name}`)")
             except discord.Forbidden:
-                await interaction.followup.send("❌ Error: Check Bot permissions.", ephemeral=True)
+                await interaction.followup.send("❌ Error: Check Bot permissions (Roles).", ephemeral=True)
                 return
 
         player_names_str = "\n".join(member_details)
@@ -392,18 +405,18 @@ class TeamModal(discord.ui.Modal, title="Update / New Team"):
     async def on_submit(self, interaction: discord.Interaction):
         uid = str(interaction.user.id)
         
-        # --- UNIQUENESS CHECK START ---
+        # --- 🔴 DUPLICATE REGISTRATION CHECK ---
         players_input = [self.p1.value, self.p2.value, self.p3.value, self.p4.value]
         is_duplicate, error_msg = check_duplicates(uid, self.team.value, players_input)
         
         if is_duplicate:
             await interaction.response.send_message(error_msg, ephemeral=True)
             return
-        # --- UNIQUENESS CHECK END ---
+        # ----------------------------------------
 
         data["teams"][uid] = {
             "team": self.team.value,
-            "players": [p for p in players_input if p], # Save only non-empty players
+            "players": [p for p in players_input if p], 
             "booked_slots": [],
             "last_updated": datetime.datetime.utcnow().isoformat()
         }
@@ -579,15 +592,8 @@ async def on_ready():
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def clear(ctx, amount: int = 100):
-    """
-    Clears the specified number of messages in the current channel.
-    Usage: !clear 50
-    """
     try:
-        # Purge the channel (limit includes the command message itself)
         deleted = await ctx.channel.purge(limit=amount + 1)
-        
-        # Send a confirmation message and delete it after 3 seconds
         msg = await ctx.send(f"🧹 **Cleared {len(deleted)-1} messages.**")
         await asyncio.sleep(3)
         await msg.delete()
