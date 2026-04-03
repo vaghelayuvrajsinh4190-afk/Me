@@ -1,19 +1,3 @@
-“””
-╔══════════════════════════════════════════════════════════════════╗
-║          TOURNAMENT BOT — UPGRADED EDITION                      ║
-║  Features: Registration · Slots · Verification · Admin Suite    ║
-╚══════════════════════════════════════════════════════════════════╝
-
-GitHub: https://github.com/YOUR_USERNAME/tournament-bot
-
-QUICK START:
-
-1. pip install -r requirements.txt
-1. cp .env.example .env  →  fill in BOT_TOKEN
-1. Edit config.py with your role/channel names
-1. python tournament_bot.py
-   “””
-
 import discord
 from discord.ext import commands, tasks
 import json
