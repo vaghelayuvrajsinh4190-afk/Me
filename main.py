@@ -1,714 +1,845 @@
+“””
+╔══════════════════════════════════════════════════════════════════╗
+║          TOURNAMENT BOT — UPGRADED EDITION                      ║
+║  Features: Registration · Slots · Verification · Admin Suite    ║
+╚══════════════════════════════════════════════════════════════════╝
+
+GitHub: https://github.com/YOUR_USERNAME/tournament-bot
+
+QUICK START:
+
+1. pip install -r requirements.txt
+1. cp .env.example .env  →  fill in BOT_TOKEN
+1. Edit config.py with your role/channel names
+1. python tournament_bot.py
+   “””
+
 import discord
 from discord.ext import commands, tasks
-from discord import ui
 import json
 import os
 import asyncio
-import datetime
-import keep_alive
+import io
+from datetime import datetime, timedelta
+import pytz
 
-# ================= 1. CONFIGURATION =================
-TOKEN = os.environ.get("TOKEN")
+# ── Import all config ──────────────────────────────────────────────
 
-# --- CHANNELS ---
-ADMIN_COMMAND_CHANNEL_ID = 1459806817734361282
-REGISTRATION_CHANNEL_ID = 1458788627164303432
-CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
-ADMIN_LOG_CHANNEL_ID = 1459460369780047892
-VERIFY_CHANNEL_ID = 1461666929516347453
-VERIFIED_TEAM_LOG_ID = 1466725299675856947 
+from config import (
+BOT_TOKEN,
+ADMIN_ROLE_NAME,
+VERIFIED_ROLE_NAME,
+ADMIN_CHANNEL_NAME,
+LOG_CHANNEL_NAME,
+REG_CHANNEL_NAME,
+SLOT_CHANNELS,
+SLOTS_PER_MATCH,
+TIMEZONE,
+DATA_FILE,
+)
 
-# MATCH CHANNELS
-SLOT_LIST_CHANNELS = {
-    "MATCH_1": 1459460237437435999,
-    "MATCH_2": 1459471324593389725,
-    "MATCH_3": 1459471494785531965,
-    "MATCH_4": 1459472478651945070
-}
+IST = pytz.timezone(TIMEZONE)
 
-# ROOM CHANNELS
-ROOM_CHANNELS = {
-    "MATCH_1": 1458788771716792486,
-    "MATCH_2": 1459772021448904822,
-    "MATCH_3": 1459772074112454750,
-    "MATCH_4": 1459772130232373512
-}
+# ──────────────────────────────────────────────────────────────────
 
-# ROLES
-SLOT_ROLES = {
-    "MATCH_1": "Match 1 Player",
-    "MATCH_2": "Match 2 Player",
-    "MATCH_3": "Match 3 Player",
-    "MATCH_4": "Match 4 Player"
-}
+# DATA STORE
 
-VERIFY_ROLE_NAME = "Verified Team"
+# ──────────────────────────────────────────────────────────────────
 
-# --- SETTINGS ---
-MAX_SLOTS = 16
-DATA_FILE = "data.json"
-REGISTRATION_OPEN = True
-TIMEZONE_OFFSET = 5.5 # India Standard Time
-DATA_EXPIRY_DAYS = 7  # Delete team data after 7 days
-
-# ================= 2. DATA HANDLING =================
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        default_data = {
-            "teams": {}, 
-            "slots": {k: [] for k in SLOT_LIST_CHANNELS},
-            "table_messages": {} 
-        }
-        with open(DATA_FILE, "w") as f:
-            json.dump(default_data, f, indent=4)
-        return default_data
-    
-    with open(DATA_FILE, "r") as f:
-        data = json.load(f)
-        if "table_messages" not in data:
-            data["table_messages"] = {}
-        if "SLOT_1" in data["slots"]:
-            new_slots = {k.replace("SLOT", "MATCH"): v for k, v in data["slots"].items()}
-            data["slots"] = new_slots
-            save_data(data)
-        return data
+if not os.path.exists(DATA_FILE):
+return {
+“teams”: {},
+“slots”: {
+“MATCH_1”: {},
+“MATCH_2”: {},
+“MATCH_3”: {},
+“MATCH_4”: {},
+},
+“registration_open”: True,
+“slot_table_messages”: {},
+“registration_message_id”: None,
+}
+with open(DATA_FILE, “r”) as f:
+return json.load(f)
 
 def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+with open(DATA_FILE, “w”) as f:
+json.dump(data, f, indent=2)
 
 data = load_data()
 
-# ================= 3. HELPER FUNCTIONS =================
-async def get_or_create_role(guild, role_name):
-    role = discord.utils.get(guild.roles, name=role_name)
-    if not role:
-        try:
-            role = await guild.create_role(name=role_name, mentionable=True)
-        except: return None
-    return role
+# ──────────────────────────────────────────────────────────────────
 
-async def setup_channel_perms(guild):
-    for slot_name, role_name in SLOT_ROLES.items():
-        role = await get_or_create_role(guild, role_name)
-        if not role: continue
+# BOT SETUP
 
-        channels_to_lock = []
-        if slot_name in SLOT_LIST_CHANNELS:
-            channels_to_lock.append(guild.get_channel(SLOT_LIST_CHANNELS[slot_name]))
-        if slot_name in ROOM_CHANNELS:
-            channels_to_lock.append(guild.get_channel(ROOM_CHANNELS[slot_name]))
-        
-        for ch in channels_to_lock:
-            if ch:
-                overwrites = {
-                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                    role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-                    guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-                }
-                await ch.edit(overwrites=overwrites)
-                print(f"🔒 Locked channel {ch.name} to role {role.name}")
+# ──────────────────────────────────────────────────────────────────
 
-def check_duplicates(current_uid, new_team_name, new_players):
-    """
-    Checks if team name or player names already exist in database (Registration).
-    """
-    new_team_clean = new_team_name.strip().lower()
-    new_players_clean = [p.strip().lower() for p in new_players if p.strip()]
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
 
-    # 1. Check for duplicates within the current submission
-    if len(new_players_clean) != len(set(new_players_clean)):
-        return True, "❌ You entered the same player name twice in this form."
+bot = commands.Bot(command_prefix=”!”, intents=intents)
 
-    for uid, info in data["teams"].items():
-        if uid == current_uid:
-            continue
+# ──────────────────────────────────────────────────────────────────
 
-        existing_team = info.get("team", "").strip().lower()
-        if existing_team == new_team_clean:
-            return True, f"❌ Team Name **'{new_team_name}'** is already taken by another squad!"
+# HELPERS
 
-        existing_players = [p.strip().lower() for p in info.get("players", [])]
-        for np in new_players_clean:
-            if np in existing_players:
-                return True, f"❌ Player Name **'{np}'** is already registered in another team!"
+# ──────────────────────────────────────────────────────────────────
 
-    return False, ""
+def is_admin(ctx):
+“”“Check if the command author has the Admin role.”””
+return any(r.name == ADMIN_ROLE_NAME for r in ctx.author.roles)
 
-# ================= 4. LIVE TABLE REFRESH =================
-async def refresh_table(guild, slot_name):
-    channel_id = SLOT_LIST_CHANNELS.get(slot_name)
-    if not channel_id: return
-    channel = guild.get_channel(channel_id)
-    if not channel: return
+def error_embed(msg: str) -> discord.Embed:
+return discord.Embed(title=“❌ Error”, description=msg, color=0xFF4444)
 
-    registered_uids = data["slots"].get(slot_name, [])
-    table_lines = [f"{'NO.':<3} | {'TEAM NAME'}", "-" * 30]
-    
-    for i in range(MAX_SLOTS):
-        slot_num = i + 1
-        if i < len(registered_uids):
-            uid = registered_uids[i]
-            team_name = data["teams"].get(uid, {}).get("team", "Unknown")
-            team_name = (team_name[:18] + '..') if len(team_name) > 18 else team_name
-            table_lines.append(f"{slot_num:02d}  | {team_name}")
-        else:
-            table_lines.append(f"{slot_num:02d}  | [ OPEN ]")
+def success_embed(title: str, msg: str) -> discord.Embed:
+return discord.Embed(title=f”✅ {title}”, description=msg, color=0x00CC66)
 
-    tabular_data = "\n".join(table_lines)
-    display_name = slot_name.replace("_", " ")
-    count = len(registered_uids)
-    color = discord.Color.green() if count < MAX_SLOTS else discord.Color.red()
-    status = "🟢 Open" if count < MAX_SLOTS else "🔴 Full"
+def get_slot_table_embed(match_id: str) -> discord.Embed:
+“”“Build the live slot table embed for a match.”””
+slots = data[“slots”].get(match_id, {})
+lines = []
+for i in range(1, SLOTS_PER_MATCH + 1):
+team = slots.get(str(i))
+lines.append(f”`{i:02d}` ✅  **{team}**” if team else f”`{i:02d}` 🟢  *— Open —*”)
+
+```
+filled = len([v for v in slots.values() if v])
+embed = discord.Embed(
+    title=f"🎮 {match_id} — Slot List",
+    description="\n".join(lines),
+    color=0x00BFFF,
+)
+embed.set_footer(
+    text=f"Slots filled: {filled}/{SLOTS_PER_MATCH}  •  "
+         f"Last updated: {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}"
+)
+return embed
+```
+
+async def update_slot_table(guild: discord.Guild, match_id: str):
+“”“Post or edit the slot table message in the correct channel.”””
+channel_name = SLOT_CHANNELS.get(match_id)
+channel = discord.utils.get(guild.text_channels, name=channel_name)
+if not channel:
+return
+
+```
+embed = get_slot_table_embed(match_id)
+msg_id = data["slot_table_messages"].get(match_id)
+
+try:
+    if msg_id:
+        msg = await channel.fetch_message(int(msg_id))
+        await msg.edit(embed=embed)
+    else:
+        raise discord.NotFound(None, None)
+except discord.NotFound:
+    msg = await channel.send(embed=embed)
+    data["slot_table_messages"][match_id] = str(msg.id)
+    save_data(data)
+```
+
+async def log_action(
+guild: discord.Guild,
+title: str,
+description: str,
+color: int = 0xFFA500,
+fields: dict = None,
+):
+“”“Send an audit log embed to the log channel.”””
+log_ch = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
+if not log_ch:
+return
+embed = discord.Embed(
+title=f”📋 {title}”,
+description=description,
+color=color,
+timestamp=datetime.now(IST),
+)
+if fields:
+for name, value in fields.items():
+embed.add_field(name=name, value=value, inline=False)
+embed.set_footer(text=“Tournament Bot • Audit Log”)
+await log_ch.send(embed=embed)
+
+# ──────────────────────────────────────────────────────────────────
+
+# REGISTRATION MODAL
+
+# ──────────────────────────────────────────────────────────────────
+
+class RegisterModal(discord.ui.Modal, title=“📝 Register Your Team”):
+team_name = discord.ui.TextInput(
+label=“Team Name”, placeholder=“e.g. Shadow Squad”, max_length=32
+)
+player1 = discord.ui.TextInput(
+label=“Player 1 IGN”, placeholder=“In-game name of Player 1”, max_length=32
+)
+player2 = discord.ui.TextInput(
+label=“Player 2 IGN”, placeholder=“In-game name of Player 2”, max_length=32
+)
+player3 = discord.ui.TextInput(
+label=“Player 3 IGN”, placeholder=“In-game name of Player 3”, max_length=32
+)
+player4 = discord.ui.TextInput(
+label=“Player 4 IGN”, placeholder=“In-game name of Player 4”, max_length=32
+)
+
+```
+async def on_submit(self, interaction: discord.Interaction):
+    # Registration closed?
+    if not data["registration_open"]:
+        return await interaction.response.send_message(
+            embed=error_embed("Registrations are currently **closed**. Please wait for an admin."),
+            ephemeral=True,
+        )
+
+    tname = self.team_name.value.strip()
+    players = [
+        self.player1.value.strip(),
+        self.player2.value.strip(),
+        self.player3.value.strip(),
+        self.player4.value.strip(),
+    ]
+
+    # Duplicate team name check
+    if tname.lower() in [t.lower() for t in data["teams"]]:
+        return await interaction.response.send_message(
+            embed=error_embed(f"Team name **{tname}** is already taken. Choose a different name."),
+            ephemeral=True,
+        )
+
+    # Duplicate player IGN check (across all registered teams)
+    existing = [p.lower() for t in data["teams"].values() for p in t["players"]]
+    dupes = [p for p in players if p.lower() in existing]
+    if dupes:
+        return await interaction.response.send_message(
+            embed=error_embed(f"These IGNs are already registered: **{', '.join(dupes)}**"),
+            ephemeral=True,
+        )
+
+    # Save team
+    data["teams"][tname] = {
+        "players": players,
+        "captain_id": str(interaction.user.id),
+        "registered_at": datetime.now(IST).isoformat(),
+    }
+    save_data(data)
 
     embed = discord.Embed(
-        title=f"🏆 {display_name} Live List",
-        description=f"**Status:** {status}\n**Filled:** {count}/{MAX_SLOTS}",
-        color=color
+        title="🎉 Team Registered!",
+        description=f"**{tname}** has been successfully registered.",
+        color=0x00CC66,
     )
-    embed.add_field(name="Registered Teams", value=f"```text\n{tabular_data}\n```", inline=False)
-    embed.set_footer(text="Updates automatically • Do not type here")
+    embed.add_field(name="👥 Players", value="\n".join(f"• {p}" for p in players), inline=False)
+    embed.set_footer(text="Head to a match channel to claim your slot!")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    msg_id = data["table_messages"].get(slot_name)
-    message = None
-    if msg_id:
-        try:
-            message = await channel.fetch_message(msg_id)
-            await message.edit(embed=embed)
-        except discord.NotFound:
-            message = None 
-    
-    if message is None:
-        message = await channel.send(embed=embed)
-        data["table_messages"][slot_name] = message.id
+    await log_action(
+        interaction.guild,
+        "Team Registered",
+        f"**{tname}** registered by {interaction.user.mention}",
+        color=0x00CC66,
+        fields={"Players": "\n".join(players)},
+    )
+```
+
+# ──────────────────────────────────────────────────────────────────
+
+# REGISTRATION BUTTON VIEW (persistent across restarts)
+
+# ──────────────────────────────────────────────────────────────────
+
+class RegistrationView(discord.ui.View):
+def **init**(self):
+super().**init**(timeout=None)
+
+```
+@discord.ui.button(
+    label="📝 Register Team",
+    style=discord.ButtonStyle.primary,
+    custom_id="open_register_modal",
+)
+async def register_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    if not data["registration_open"]:
+        return await interaction.response.send_message(
+            embed=error_embed("Registrations are currently **closed**."), ephemeral=True
+        )
+    await interaction.response.send_modal(RegisterModal())
+```
+
+# ──────────────────────────────────────────────────────────────────
+
+# SLOT CLAIM VIEW
+
+# ──────────────────────────────────────────────────────────────────
+
+class SlotClaimView(discord.ui.View):
+def **init**(self, match_id: str):
+super().**init**(timeout=None)
+self.match_id = match_id
+
+```
+    # Slot buttons 1–16 (rows 0–2, max 5 per row)
+    for i in range(1, SLOTS_PER_MATCH + 1):
+        btn = discord.ui.Button(
+            label=str(i),
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"slot_{match_id}_{i}",
+            row=(i - 1) // 5,
+        )
+        btn.callback = self._make_slot_callback(i)
+        self.add_item(btn)
+
+    # Quick claim button
+    quick = discord.ui.Button(
+        label="⚡ Quick Claim (Auto-Assign)",
+        style=discord.ButtonStyle.success,
+        custom_id=f"quick_{match_id}",
+        row=3,
+    )
+    quick.callback = self._quick_claim
+    self.add_item(quick)
+
+def _get_user_team(self, user_id: str):
+    for tname, tdata in data["teams"].items():
+        if tdata["captain_id"] == user_id:
+            return tname
+    return None
+
+def _make_slot_callback(self, slot_no: int):
+    async def callback(interaction: discord.Interaction):
+        team_name = self._get_user_team(str(interaction.user.id))
+        if not team_name:
+            return await interaction.response.send_message(
+                embed=error_embed("You don't have a registered team. Please register first."),
+                ephemeral=True,
+            )
+
+        slot_key = str(slot_no)
+        occupant = data["slots"][self.match_id].get(slot_key)
+        if occupant:
+            return await interaction.response.send_message(
+                embed=error_embed(f"Slot **{slot_no}** is already taken by **{occupant}**."),
+                ephemeral=True,
+            )
+
+        # Already booked a slot in this match?
+        for k, v in data["slots"][self.match_id].items():
+            if v == team_name:
+                return await interaction.response.send_message(
+                    embed=error_embed(f"**{team_name}** already has Slot **{k}** in {self.match_id}."),
+                    ephemeral=True,
+                )
+
+        data["slots"][self.match_id][slot_key] = team_name
         save_data(data)
+        await update_slot_table(interaction.guild, self.match_id)
 
-# ================= 5. CORE LOGIC (SLOTS ADD/REMOVE) =================
-async def add_player_to_slot(interaction, slot_name):
-    uid = str(interaction.user.id)
+        await interaction.response.send_message(
+            embed=success_embed("Slot Claimed!", f"**{team_name}** claimed **Slot {slot_no}** in **{self.match_id}**. Good luck! 🏆"),
+            ephemeral=True,
+        )
+        await log_action(
+            interaction.guild,
+            "Slot Claimed",
+            f"**{team_name}** claimed Slot {slot_no} in {self.match_id}",
+            color=0x00BFFF,
+        )
+
+    return callback
+
+async def _quick_claim(self, interaction: discord.Interaction):
+    team_name = self._get_user_team(str(interaction.user.id))
+    if not team_name:
+        return await interaction.response.send_message(
+            embed=error_embed("You don't have a registered team."), ephemeral=True
+        )
+
+    for k, v in data["slots"][self.match_id].items():
+        if v == team_name:
+            return await interaction.response.send_message(
+                embed=error_embed(f"**{team_name}** already has Slot **{k}** in {self.match_id}."),
+                ephemeral=True,
+            )
+
+    for i in range(1, SLOTS_PER_MATCH + 1):
+        if not data["slots"][self.match_id].get(str(i)):
+            data["slots"][self.match_id][str(i)] = team_name
+            save_data(data)
+            await update_slot_table(interaction.guild, self.match_id)
+            await interaction.response.send_message(
+                embed=success_embed("⚡ Auto-Assigned!", f"**{team_name}** → **Slot {i}** in **{self.match_id}**!"),
+                ephemeral=True,
+            )
+            await log_action(
+                interaction.guild,
+                "Quick Claim",
+                f"**{team_name}** auto-assigned Slot {i} in {self.match_id}",
+                color=0x00BFFF,
+            )
+            return
+
+    await interaction.response.send_message(
+        embed=error_embed(f"**{self.match_id}** is completely full! No slots available."),
+        ephemeral=True,
+    )
+```
+
+# ──────────────────────────────────────────────────────────────────
+
+# VERIFICATION VIEW
+
+# ──────────────────────────────────────────────────────────────────
+
+class VerifyTeamView(discord.ui.View):
+def **init**(self, team_name: str):
+super().**init**(timeout=120)
+self.team_name = team_name
+
+```
+@discord.ui.select(
+    cls=discord.ui.UserSelect,
+    placeholder="Select all 4 team members...",
+    min_values=4,
+    max_values=4,
+    custom_id="verify_member_select",
+)
+async def select_members(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
     guild = interaction.guild
-    
-    if not REGISTRATION_OPEN:
-        await interaction.response.send_message("⛔ **Match is starting! Registration is closed.**", ephemeral=True)
-        return False
-        
-    if len(data["slots"][slot_name]) >= MAX_SLOTS:
-        return False
+    verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+    if not verified_role:
+        verified_role = await guild.create_role(
+            name=VERIFIED_ROLE_NAME, color=discord.Color.green()
+        )
 
-    if uid in data["slots"][slot_name]:
-        await interaction.response.send_message(f"⚠️ You are already in **{slot_name}**.", ephemeral=True)
-        return False
+    members = select.values
+    for m in members:
+        await m.add_roles(verified_role)
 
-    data["slots"][slot_name].append(uid)
-    if "booked_slots" not in data["teams"][uid]:
-        data["teams"][uid]["booked_slots"] = []
-    
-    if slot_name not in data["teams"][uid]["booked_slots"]:
-        data["teams"][uid]["booked_slots"].append(slot_name)
-    save_data(data)
+    embed = discord.Embed(
+        title="✅ Team Verified!",
+        description=f"**{self.team_name}** has been verified and roles assigned.",
+        color=0x00CC66,
+    )
+    embed.add_field(
+        name="Members",
+        value="\n".join(f"{m.mention} ({m.display_name})" for m in members),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed)
 
-    role_name = SLOT_ROLES.get(slot_name)
-    if role_name:
-        role = await get_or_create_role(guild, role_name)
-        if role:
-            try: await interaction.user.add_roles(role)
-            except: pass
+    await log_action(
+        guild,
+        "Team Verified",
+        f"**{self.team_name}** verified by {interaction.user.mention}",
+        color=0x00CC66,
+        fields={"Members": "\n".join(f"{m.mention} ({m.display_name})" for m in members)},
+    )
+```
 
-    await refresh_table(guild, slot_name)
-    return True
+# ──────────────────────────────────────────────────────────────────
 
-async def perform_removal(guild, uid, slot_name):
-    if uid in data["slots"][slot_name]:
-        data["slots"][slot_name].remove(uid)
-    
-    if uid in data["teams"] and slot_name in data["teams"][uid]["booked_slots"]:
-        data["teams"][uid]["booked_slots"].remove(slot_name)
-    
-    save_data(data)
+# ADMIN COMMANDS
 
-    role_name = SLOT_ROLES.get(slot_name)
-    if role_name:
-        role = discord.utils.get(guild.roles, name=role_name)
-        member = guild.get_member(int(uid))
-        if role and member:
-            try: await member.remove_roles(role)
-            except: pass
+# ──────────────────────────────────────────────────────────────────
 
-    await refresh_table(guild, slot_name)
+@bot.command()
+async def setup(ctx):
+“”“Creates all channels and posts the registration button + slot tables.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
 
-async def remove_single_slot_logic(interaction, slot_to_remove):
-    uid = str(interaction.user.id)
-    if uid not in data["teams"]: return False, "No team data."
-    booked = data["teams"][uid].get("booked_slots", [])
-    
-    if slot_to_remove not in booked:
-        return False, "You don't own this slot."
+```
+guild = ctx.guild
 
-    await perform_removal(interaction.guild, uid, slot_to_remove)
-    return True, f"✅ Removed from **{slot_to_remove}**."
+# Create channels if they don't exist
+for name in [REG_CHANNEL_NAME, LOG_CHANNEL_NAME, *SLOT_CHANNELS.values()]:
+    if not discord.utils.get(guild.text_channels, name=name):
+        await guild.create_text_channel(name)
 
-async def remove_all_slots_logic(interaction):
-    uid = str(interaction.user.id)
-    if uid not in data["teams"] or not data["teams"][uid].get("booked_slots"):
-        return False, "You have no slots to cancel."
+# Post registration embed + button
+reg_ch = discord.utils.get(guild.text_channels, name=REG_CHANNEL_NAME)
+embed = discord.Embed(
+    title="🏆 Tournament Registration",
+    description=(
+        "Welcome to the **Tournament Registration System**!\n\n"
+        "Click the button below to register your team.\n"
+        "You'll need your **Team Name** and **4 Player IGNs**.\n\n"
+        "After registering, head to a match channel to claim your slot!"
+    ),
+    color=0x00BFFF,
+)
+embed.set_footer(text="Registrations are currently OPEN ✅")
+await reg_ch.send(embed=embed, view=RegistrationView())
 
-    booked = list(data["teams"][uid]["booked_slots"])
-    for s in booked:
-        await perform_removal(interaction.guild, uid, s)
-    return True, "✅ All matches cancelled."
+# Post slot tables for all matches
+for match_id in data["slots"]:
+    await update_slot_table(guild, match_id)
 
-# ================= 6. AUTO-RESET TASK =================
-@tasks.loop(minutes=1)
-async def daily_reset_task():
-    utc_now = datetime.datetime.utcnow()
-    local_now = utc_now + datetime.timedelta(hours=TIMEZONE_OFFSET)
-    
-    if local_now.hour == 0 and local_now.minute == 0:
-        print("🕛 MIDNIGHT RESET: Cleaning up...")
-        if not bot.guilds: return
-        guild = bot.guilds[0]
+await ctx.send(embed=success_embed("Setup Complete!", "All channels and tables have been created."))
+await log_action(guild, "Bot Setup", f"Setup completed by {ctx.author.mention}", color=0x9B59B6)
+```
 
-        for slot_name, uids in data["slots"].items():
-            role_name = SLOT_ROLES.get(slot_name)
-            role = discord.utils.get(guild.roles, name=role_name)
-            if role:
-                for uid in uids:
-                    member = guild.get_member(int(uid))
-                    if member:
-                        try: await member.remove_roles(role)
-                        except: pass
-            data["slots"][slot_name] = [] 
+@bot.command()
+async def lock(ctx):
+“”“Closes team registrations.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+data[“registration_open”] = False
+save_data(data)
+await ctx.send(embed=discord.Embed(title=“🔒 Registrations Locked”, description=“No new teams can register.”, color=0xFF4444))
+await log_action(ctx.guild, “Registrations Locked”, f”Locked by {ctx.author.mention}”, color=0xFF4444)
 
-        for uid in data["teams"]:
-            data["teams"][uid]["booked_slots"] = []
+@bot.command()
+async def unlock(ctx):
+“”“Opens team registrations.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+data[“registration_open”] = True
+save_data(data)
+await ctx.send(embed=discord.Embed(title=“🔓 Registrations Opened”, description=“Teams can now register!”, color=0x00CC66))
+await log_action(ctx.guild, “Registrations Opened”, f”Opened by {ctx.author.mention}”, color=0x00CC66)
 
-        uids_to_delete = []
-        for uid, info in data["teams"].items():
-            reg_time_str = info.get("last_updated", utc_now.isoformat()) 
-            reg_time = datetime.datetime.fromisoformat(reg_time_str)
-            if (utc_now - reg_time).days >= DATA_EXPIRY_DAYS:
-                uids_to_delete.append(uid)
-        
-        for uid in uids_to_delete:
-            del data["teams"][uid]
-            print(f"🗑️ Deleted expired data for User ID: {uid}")
+@bot.command()
+async def announce(ctx, match_id: str):
+“”“Posts a rich match announcement embed with all registered teams.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
 
-        save_data(data)
+```
+match_id = match_id.upper()
+if match_id not in data["slots"]:
+    return await ctx.send(embed=error_embed("Invalid match. Use: MATCH_1, MATCH_2, MATCH_3, MATCH_4"))
 
-        for slot_name in SLOT_LIST_CHANNELS:
-            await refresh_table(guild, slot_name)
-            await asyncio.sleep(1)
+slots = data["slots"][match_id]
+filled = [v for v in slots.values() if v]
+teams_list = (
+    "\n".join(f"`{k}.` {v}" for k, v in sorted(slots.items(), key=lambda x: int(x[0])) if v)
+    or "*No teams registered yet.*"
+)
 
-        log_ch = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if log_ch: await log_ch.send("🕛 **Daily Reset & Cleanup Complete.**")
-        
-        global REGISTRATION_OPEN
-        REGISTRATION_OPEN = True
+embed = discord.Embed(
+    title=f"📢 {match_id} — Official Announcement",
+    description=f"**{len(filled)}/{SLOTS_PER_MATCH}** slots filled.\n\nRegistered teams for this match:",
+    color=0xFFD700,
+    timestamp=datetime.now(IST),
+)
+embed.add_field(name="🏅 Registered Teams", value=teams_list, inline=False)
+embed.set_footer(text="Tournament Bot • Good luck to all participants!")
+await ctx.send(embed=embed)
+await log_action(ctx.guild, "Match Announced", f"{match_id} announced by {ctx.author.mention}", color=0xFFD700)
+```
 
-# ================= 7. VERIFICATION SYSTEM (UPDATED) =================
-class PlayerSelect(ui.UserSelect):
-    def __init__(self, team_name):
-        self.team_name = team_name
-        super().__init__(placeholder="Select the 4 Players...", min_values=4, max_values=4)
+@bot.command()
+async def notify_start(ctx, minutes: int):
+“”“Pings all registered team captains with a match start warning.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
 
-    async def callback(self, interaction: discord.Interaction):
-        role = discord.utils.get(interaction.guild.roles, name=VERIFY_ROLE_NAME)
-        if not role:
-            await interaction.response.send_message(f"❌ Error: Role '{VERIFY_ROLE_NAME}' not found.", ephemeral=True)
-            return
+```
+embed = discord.Embed(
+    title="⏰ Match Starting Soon!",
+    description=f"Your match starts in **{minutes} minute(s)**!\nMake sure your entire team is ready.",
+    color=0xFF8800,
+    timestamp=datetime.now(IST),
+)
+embed.set_footer(text="Good luck to all teams! 🏆")
 
-        members = self.values # List of selected Discord Members
+mentions = []
+for tdata in data["teams"].values():
+    cap_id = tdata.get("captain_id")
+    if cap_id:
+        member = ctx.guild.get_member(int(cap_id))
+        if member:
+            mentions.append(member.mention)
 
-        # --- 🔴 STOP IF ALREADY VERIFIED ---
-        # This loop checks if any of the selected members already have the role.
-        already_verified = []
-        for member in members:
-            if role in member.roles:
-                already_verified.append(member.mention)
-        
-        if already_verified:
-            # If anyone is found, STOP everything.
-            player_list = ", ".join(already_verified)
-            await interaction.response.send_message(
-                f"⛔ **Verification Failed!**\nThe following players are already verified:\n{player_list}\n\nThey cannot be verified again.", 
-                ephemeral=True
-            )
-            return
-        # -----------------------------------
+ping_str = " ".join(mentions) if mentions else "@here"
+await ctx.send(content=ping_str, embed=embed)
+await log_action(
+    ctx.guild,
+    "Match Notification Sent",
+    f"Notified {len(mentions)} captain(s) — {minutes}min warning by {ctx.author.mention}",
+    color=0xFF8800,
+)
+```
 
-        await interaction.response.defer(ephemeral=True)
+@bot.command()
+async def force_remove(ctx, match_id: str, slot_no: int):
+“”“Admin removes a team from a specific slot.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
 
-        member_details = []
-        for member in members:
+```
+match_id = match_id.upper()
+slot_key = str(slot_no)
+team = data["slots"].get(match_id, {}).get(slot_key)
+if not team:
+    return await ctx.send(embed=error_embed(f"Slot {slot_no} in {match_id} is already empty."))
+
+del data["slots"][match_id][slot_key]
+save_data(data)
+await update_slot_table(ctx.guild, match_id)
+await ctx.send(embed=success_embed("Slot Cleared", f"**{team}** removed from Slot {slot_no} in {match_id}."))
+await log_action(
+    ctx.guild,
+    "Force Remove",
+    f"Slot {slot_no} in {match_id} cleared by {ctx.author.mention} (was: **{team}**)",
+    color=0xFF4444,
+)
+```
+
+@bot.command()
+async def swap_slots(ctx, match_id: str, slot1: int, slot2: int):
+“”“Swaps two teams’ slot positions within a match.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+
+```
+match_id = match_id.upper()
+s = data["slots"].get(match_id, {})
+t1 = s.get(str(slot1))
+t2 = s.get(str(slot2))
+
+if not t1 and not t2:
+    return await ctx.send(embed=error_embed("Both slots are empty. Nothing to swap."))
+
+# Perform swap
+if t2:
+    s[str(slot1)] = t2
+else:
+    s.pop(str(slot1), None)
+if t1:
+    s[str(slot2)] = t1
+else:
+    s.pop(str(slot2), None)
+
+save_data(data)
+await update_slot_table(ctx.guild, match_id)
+await ctx.send(embed=success_embed(
+    "Slots Swapped",
+    f"Slot {slot1} ({t1 or 'empty'}) ↔ Slot {slot2} ({t2 or 'empty'}) in {match_id}."
+))
+await log_action(
+    ctx.guild,
+    "Slots Swapped",
+    f"Slot {slot1} ↔ {slot2} in {match_id} by {ctx.author.mention}",
+    color=0xFFA500,
+)
+```
+
+@bot.command()
+async def match_status(ctx):
+“”“Shows a visual fill-bar overview of all 4 matches.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+
+```
+embed = discord.Embed(title="📊 Match Status Overview", color=0x9B59B6, timestamp=datetime.now(IST))
+for match_id in ["MATCH_1", "MATCH_2", "MATCH_3", "MATCH_4"]:
+    slots = data["slots"].get(match_id, {})
+    filled = len([v for v in slots.values() if v])
+    bar = "█" * filled + "░" * (SLOTS_PER_MATCH - filled)
+    pct = int((filled / SLOTS_PER_MATCH) * 100)
+    embed.add_field(
+        name=f"🎮 {match_id}",
+        value=f"`{bar}` {filled}/{SLOTS_PER_MATCH} ({pct}%)",
+        inline=False,
+    )
+embed.set_footer(text="Tournament Bot")
+await ctx.send(embed=embed)
+```
+
+@bot.command()
+async def export_teams(ctx):
+“”“Downloads all registered teams as a .txt file.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+
+```
+lines = ["TOURNAMENT TEAMS EXPORT", "=" * 40]
+for tname, tdata in data["teams"].items():
+    lines.append(f"\nTeam: {tname}")
+    lines.append(f"  Registered: {tdata.get('registered_at', 'N/A')}")
+    lines.append("  Players:")
+    for p in tdata.get("players", []):
+        lines.append(f"    - {p}")
+
+lines += ["\n" + "=" * 40, f"Total Teams: {len(data['teams'])}"]
+
+buf = io.BytesIO("\n".join(lines).encode("utf-8"))
+await ctx.send(
+    embed=success_embed("Export Ready", f"Exporting **{len(data['teams'])}** teams."),
+    file=discord.File(buf, filename="teams_export.txt"),
+)
+```
+
+@bot.command()
+async def broadcast(ctx, *, message: str):
+“”“DMs all registered team captains with a custom message.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+
+```
+embed = discord.Embed(
+    title="📣 Tournament Broadcast",
+    description=message,
+    color=0x00BFFF,
+    timestamp=datetime.now(IST),
+)
+embed.set_footer(text="Message from Tournament Organizers")
+
+sent = failed = 0
+for tdata in data["teams"].values():
+    cap_id = tdata.get("captain_id")
+    if cap_id:
+        member = ctx.guild.get_member(int(cap_id))
+        if member:
             try:
-                await member.add_roles(role)
-                member_details.append(f"• {member.mention} (`{member.name}`)")
-            except discord.Forbidden:
-                await interaction.followup.send("❌ Error: Check Bot permissions (Roles).", ephemeral=True)
-                return
+                await member.send(embed=embed)
+                sent += 1
+            except Exception:
+                failed += 1
 
-        player_names_str = "\n".join(member_details)
+await ctx.send(embed=success_embed("Broadcast Sent", f"Delivered to **{sent}** captain(s). Failed: {failed}."))
+await log_action(
+    ctx.guild,
+    "Broadcast Sent",
+    f"By {ctx.author.mention} — Sent: {sent}, Failed: {failed}\n\n**Message:** {message}",
+    color=0x00BFFF,
+)
+```
 
-        # 1. Send Log to Verified Channel
-        log_channel = interaction.guild.get_channel(VERIFIED_TEAM_LOG_ID)
-        if log_channel:
-            log_embed = discord.Embed(
-                title="🛡️ New Team Verified",
-                color=discord.Color.gold(),
-                timestamp=datetime.datetime.utcnow()
-            )
-            log_embed.add_field(name="Team Name", value=self.team_name, inline=False)
-            log_embed.add_field(name="Verified Players", value=player_names_str, inline=False)
-            log_embed.set_footer(text=f"Verified by {interaction.user.name}")
-            await log_channel.send(embed=log_embed)
+@bot.command()
+async def verify_team(ctx, *, team_name: str):
+“”“Start verification for a team — admin selects 4 Discord members.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+if team_name not in data[“teams”]:
+return await ctx.send(embed=error_embed(f”Team **{team_name}** not found.”))
 
-        # 2. Confirmation to User
-        embed = discord.Embed(
-            title=f"✅ Team Verified: {self.team_name}",
-            description=f"**Role Given:** {role.mention}\n**Players:**\n{player_names_str}",
-            color=discord.Color.green()
+```
+embed = discord.Embed(
+    title=f"🔍 Verify: {team_name}",
+    description="Use the dropdown below to select all 4 Discord members for this team.",
+    color=0x9B59B6,
+)
+await ctx.send(embed=embed, view=VerifyTeamView(team_name))
+```
+
+@bot.command()
+async def init_tables(ctx):
+“”“Refreshes all live slot tables.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+for match_id in data[“slots”]:
+await update_slot_table(ctx.guild, match_id)
+await ctx.send(embed=success_embed(“Tables Refreshed”, “All slot tables have been updated.”))
+
+@bot.command()
+async def clear(ctx):
+“”“Purges the last 100 messages in the current channel.”””
+if not is_admin(ctx):
+return await ctx.send(embed=error_embed(“Admins only.”))
+deleted = await ctx.channel.purge(limit=100)
+msg = await ctx.send(embed=success_embed(“Cleared”, f”Deleted **{len(deleted)}** messages.”))
+await asyncio.sleep(3)
+await msg.delete()
+
+# ──────────────────────────────────────────────────────────────────
+
+# AUTO MIDNIGHT RESET (IST)
+
+# ──────────────────────────────────────────────────────────────────
+
+@tasks.loop(minutes=1)
+async def midnight_reset():
+now = datetime.now(IST)
+if now.hour == 0 and now.minute == 0:
+# Clear all slots
+for match_id in data[“slots”]:
+data[“slots”][match_id] = {}
+
+```
+    # Delete teams older than 7 days
+    cutoff = datetime.now(IST) - timedelta(days=7)
+    to_delete = []
+    for tname, tdata in data["teams"].items():
+        reg_at = tdata.get("registered_at")
+        if reg_at:
+            try:
+                if datetime.fromisoformat(reg_at) < cutoff:
+                    to_delete.append(tname)
+            except ValueError:
+                pass
+
+    for tname in to_delete:
+        del data["teams"][tname]
+
+    save_data(data)
+
+    for guild in bot.guilds:
+        # Remove Verified Team roles from all members
+        verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+        if verified_role:
+            for member in verified_role.members:
+                try:
+                    await member.remove_roles(verified_role)
+                except Exception:
+                    pass
+
+        # Refresh all slot tables
+        for match_id in data["slots"]:
+            await update_slot_table(guild, match_id)
+
+        await log_action(
+            guild,
+            "Daily Reset",
+            f"Auto-reset at midnight IST. Slots cleared. {len(to_delete)} old team(s) removed.",
+            color=0x9B59B6,
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
+```
 
-class PlayerSelectView(ui.View):
-    def __init__(self, team_name):
-        super().__init__(timeout=60)
-        self.add_item(PlayerSelect(team_name))
+# ──────────────────────────────────────────────────────────────────
 
-class TeamNameModal(ui.Modal, title="Step 1: Team Name"):
-    name_input = ui.TextInput(label="Enter Team Name", placeholder="e.g. Galaxy Crows", max_length=50)
+# BOT EVENTS
 
-    async def on_submit(self, interaction: discord.Interaction):
-        team_name = self.name_input.value
-        await interaction.response.send_message(
-            f"Please select the **4 players** for **{team_name}** below:", 
-            view=PlayerSelectView(team_name), 
-            ephemeral=True
-        )
-
-class PersistentVerifyView(ui.View):
-    def __init__(self):
-        super().__init__(timeout=None) 
-
-    @ui.button(label="Verify Team", style=discord.ButtonStyle.green, emoji="🛡️", custom_id="verify_btn_1")
-    async def verify_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_modal(TeamNameModal())
-
-# ================= 8. SLOT VIEWS =================
-class TeamModal(discord.ui.Modal, title="Update / New Team"):
-    team = discord.ui.TextInput(label="Team Name", placeholder="Enter your team name")
-    p1 = discord.ui.TextInput(label="Player 1 (IGL)", placeholder="IGN / Discord ID")
-    p2 = discord.ui.TextInput(label="Player 2", placeholder="IGN", required=False)
-    p3 = discord.ui.TextInput(label="Player 3", placeholder="IGN", required=False)
-    p4 = discord.ui.TextInput(label="Player 4", placeholder="IGN", required=False)
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        uid = str(interaction.user.id)
-        
-        # --- 🔴 DUPLICATE REGISTRATION CHECK ---
-        players_input = [self.p1.value, self.p2.value, self.p3.value, self.p4.value]
-        is_duplicate, error_msg = check_duplicates(uid, self.team.value, players_input)
-        
-        if is_duplicate:
-            await interaction.response.send_message(error_msg, ephemeral=True)
-            return
-        # ----------------------------------------
-
-        data["teams"][uid] = {
-            "team": self.team.value,
-            "players": [p for p in players_input if p], 
-            "booked_slots": [],
-            "last_updated": datetime.datetime.utcnow().isoformat()
-        }
-        save_data(data)
-        
-        log_channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if log_channel:
-            embed = discord.Embed(title="🆕 Team Registered/Updated", color=discord.Color.blue())
-            embed.add_field(name="Team", value=self.team.value)
-            embed.add_field(name="User", value=f"<@{uid}>")
-            await log_channel.send(embed=embed)
-
-        await interaction.response.send_message(
-            f"✅ Team **{self.team.value}** Saved! Select a Match:", 
-            view=SlotSelectView(), 
-            ephemeral=True
-        )
-
-class SlotButton(discord.ui.Button):
-    def __init__(self, slot):
-        count = len(data["slots"][slot])
-        display_name = slot.replace("_", " ") 
-        label = f"{display_name} ({count}/{MAX_SLOTS})"
-        style = discord.ButtonStyle.green if count < MAX_SLOTS else discord.ButtonStyle.red
-        super().__init__(label=label, style=style, disabled=(count >= MAX_SLOTS))
-        self.slot = slot
-
-    async def callback(self, interaction: discord.Interaction):
-        success = await add_player_to_slot(interaction, self.slot)
-        if success:
-            await interaction.response.send_message(f"✅ Claimed **{self.slot}**.", ephemeral=True)
-        else:
-             if not interaction.response.is_done():
-                 await interaction.response.send_message("❌ Failed or Full.", ephemeral=True)
-
-class SlotSelectView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=60)
-        for s in SLOT_LIST_CHANNELS:
-            self.add_item(SlotButton(s))
-
-class AutoClaimView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="⚡ Quick Claim (Auto-Assign)", style=discord.ButtonStyle.blurple, custom_id="auto_claim_btn")
-    async def auto_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not REGISTRATION_OPEN:
-            await interaction.response.send_message("⛔ **Claims Closed.**", ephemeral=True)
-            return
-        uid = str(interaction.user.id)
-        if uid not in data["teams"]:
-            await interaction.response.send_message("❌ Register first.", ephemeral=True)
-            return
-        assigned = None
-        for slot_name in SLOT_LIST_CHANNELS:
-            if len(data["slots"][slot_name]) < MAX_SLOTS and uid not in data["slots"][slot_name]:
-                assigned = slot_name
-                break
-        if assigned:
-            success = await add_player_to_slot(interaction, assigned)
-            if success:
-                await interaction.response.send_message(f"✅ Auto-Assigned to **{assigned}**!", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ All matches are full!", ephemeral=True)
-
-class TeamChoiceView(discord.ui.View):
-    def __init__(self, team_name):
-        super().__init__(timeout=60)
-        self.team_name = team_name
-
-    @discord.ui.button(label=f"🟢 Continue as", style=discord.ButtonStyle.success)
-    async def continue_old(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(f"✅ Using team: **{self.team_name}**. Select Match:", view=SlotSelectView(), ephemeral=True)
-
-    @discord.ui.button(label="🔵 New / Update Team", style=discord.ButtonStyle.primary)
-    async def update_new(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TeamModal())
-
-class MainRegisterView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    
-    @discord.ui.button(label="📝 Register Team", style=discord.ButtonStyle.green, custom_id="reg_btn")
-    async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = str(interaction.user.id)
-        if uid in data["teams"]:
-            last_updated = data["teams"][uid].get("last_updated")
-            if last_updated:
-                reg_time = datetime.datetime.fromisoformat(last_updated)
-                if (datetime.datetime.utcnow() - reg_time).days >= DATA_EXPIRY_DAYS:
-                    del data["teams"][uid]
-                    save_data(data)
-                    await interaction.response.send_modal(TeamModal())
-                    return
-            team_name = data["teams"][uid]["team"]
-            await interaction.response.send_message(
-                f"⚠️ You are already registered as **{team_name}**.\nDo you want to continue or register a new team?", 
-                view=TeamChoiceView(team_name), 
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_modal(TeamModal())
-
-class CancelDropdown(discord.ui.Select):
-    def __init__(self, booked_slots):
-        options = []
-        for slot in booked_slots:
-            display_name = slot.replace("_", " ")
-            options.append(discord.SelectOption(label=f"Leave {display_name}", value=slot, emoji="🗑️"))
-        options.append(discord.SelectOption(label="Leave ALL Matches", value="ALL", emoji="❌"))
-        super().__init__(placeholder="Select match to leave...", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        if self.values[0] == "ALL":
-            success, msg = await remove_all_slots_logic(interaction)
-        else:
-            success, msg = await remove_single_slot_logic(interaction, self.values[0])
-        await interaction.response.send_message(msg, ephemeral=True)
-
-class CancelAndClaimView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🗑️ Leave Match", style=discord.ButtonStyle.danger, custom_id="cancel_slot_btn")
-    async def cancel_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = str(interaction.user.id)
-        if uid not in data["teams"] or not data["teams"][uid].get("booked_slots"):
-             await interaction.response.send_message("⚠️ You have no active matches.", ephemeral=True)
-             return
-        booked = data["teams"][uid]["booked_slots"]
-        await interaction.response.send_message("Select match to leave:", view=discord.ui.View().add_item(CancelDropdown(booked)), ephemeral=True)
-
-    @discord.ui.button(label="♻️ Join Open Match", style=discord.ButtonStyle.primary, custom_id="claim_open_btn")
-    async def claim_open(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not REGISTRATION_OPEN:
-            await interaction.response.send_message("⛔ **Claims Closed.**", ephemeral=True)
-            return
-        uid = str(interaction.user.id)
-        if uid not in data["teams"]:
-            await interaction.response.send_message("❌ Register first.", ephemeral=True)
-            return
-        await interaction.response.send_message("✅ Checking availability...", view=SlotSelectView(), ephemeral=True)
-
-# ================= 9. BOT CLASS & ADMIN COMMANDS =================
-class SlotBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.all())
-    
-    async def setup_hook(self):
-        self.add_view(MainRegisterView())
-        self.add_view(AutoClaimView())
-        self.add_view(CancelAndClaimView())
-        self.add_view(PersistentVerifyView())
-
-bot = SlotBot()
-
-def is_admin_channel():
-    async def predicate(ctx):
-        if ctx.channel.id != ADMIN_COMMAND_CHANNEL_ID:
-            await ctx.send(f"❌ Wrong Channel! Use <#{ADMIN_COMMAND_CHANNEL_ID}>", delete_after=5)
-            return False
-        return True
-    return commands.check(predicate)
+# ──────────────────────────────────────────────────────────────────
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    if not daily_reset_task.is_running():
-        daily_reset_task.start()
+print(f”✅ Tournament Bot online as {bot.user} (ID: {bot.user.id})”)
+print(f”   Serving {len(bot.guilds)} guild(s)”)
+bot.add_view(RegistrationView())  # Persist registration button across restarts
+midnight_reset.start()
 
-# --- NEW COMMAND: CLEAR CHAT (ANY CHANNEL) ---
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def clear(ctx, amount: int = 100):
-    try:
-        deleted = await ctx.channel.purge(limit=amount + 1)
-        msg = await ctx.send(f"🧹 **Cleared {len(deleted)-1} messages.**")
-        await asyncio.sleep(3)
-        await msg.delete()
-    except Exception as e:
-        await ctx.send(f"❌ Error: {e}", delete_after=5)
+@bot.event
+async def on_command_error(ctx, error):
+if isinstance(error, commands.MissingRequiredArgument):
+await ctx.send(
+embed=error_embed(
+f”Missing argument: `{error.param.name}`\n”
+f”Usage: `!{ctx.command.name} {ctx.command.signature}`”
+)
+)
+elif isinstance(error, commands.BadArgument):
+await ctx.send(embed=error_embed(“Invalid argument type. Check the command usage.”))
+elif isinstance(error, commands.CommandNotFound):
+pass  # Silently ignore unknown commands
+else:
+await ctx.send(embed=error_embed(f”An unexpected error occurred:\n`{error}`”))
 
-# --- VERIFY SETUP COMMAND ---
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def setup_verify(ctx):
-    if ctx.channel.id != VERIFY_CHANNEL_ID:
-        await ctx.send(f"⚠️ Warning: This is not the configured VERIFY_CHANNEL ({VERIFY_CHANNEL_ID}).")
-    
-    embed = discord.Embed(
-        title="🛡️ Team Verification",
-        description="Click the button below to verify your squad and unlock the registration channel.",
-        color=discord.Color.blue()
-    )
-    await ctx.send(embed=embed, view=PersistentVerifyView())
-    await ctx.message.delete()
+# ──────────────────────────────────────────────────────────────────
 
-# --- SLOT ADMIN COMMANDS (RESTRICTED TO ADMIN CHANNEL) ---
-@bot.command()
-@commands.has_permissions(administrator=True)
-@is_admin_channel()
-async def force_remove(ctx, match_name: str, slot_number: int):
-    match_key = match_name.upper()
-    if match_key not in SLOT_LIST_CHANNELS:
-        await ctx.send(f"❌ Invalid Name. Use: `MATCH_1`, `MATCH_2`, `MATCH_3`, `MATCH_4`")
-        return
-    registered_uids = data["slots"].get(match_key, [])
-    index = slot_number - 1 
-    if index < 0 or index >= len(registered_uids):
-        await ctx.send(f"❌ Slot number {slot_number} is empty.")
-        return
-    target_uid = registered_uids[index]
-    await perform_removal(ctx.guild, target_uid, match_key)
-    team_name = data["teams"].get(target_uid, {}).get("team", "Unknown")
-    await ctx.send(f"✅ **Admin Removed:** Team '{team_name}' from {match_key} (Slot {slot_number}).")
+# ENTRY POINT
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-@is_admin_channel()
-async def setup(ctx):
-    await ctx.message.delete()
-    msg = await ctx.send("⚙️ **Configuring...**")
-    await setup_channel_perms(ctx.guild)
-    
-    reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
-    if reg_ch:
-        await reg_ch.purge(limit=5)
-        await reg_ch.send("📝 **TOURNAMENT REGISTRATION**", view=MainRegisterView())
-        await reg_ch.send("⚡ **Quick Actions:**", view=AutoClaimView())
-    
-    can_ch = ctx.guild.get_channel(CANCEL_CLAIM_CHANNEL_ID)
-    if can_ch:
-        await can_ch.purge(limit=5)
-        embed = discord.Embed(title="Match Management", description="Leave your match or join open spots.", color=discord.Color.orange())
-        await can_ch.send(embed=embed, view=CancelAndClaimView())
+# ──────────────────────────────────────────────────────────────────
 
-    await msg.edit(content="✅ **Setup Complete!**")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-@is_admin_channel()
-async def init_tables(ctx):
-    await ctx.send("🔄 Initializing Live Tables...")
-    for slot_name in SLOT_LIST_CHANNELS:
-        await refresh_table(ctx.guild, slot_name)
-        await asyncio.sleep(1) 
-    await ctx.send("✅ Tables are live!")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-@is_admin_channel()
-async def notify_start(ctx, minutes: int, slot_name: str = None):
-    await ctx.message.delete()
-    target_slot = slot_name.upper() if slot_name else None
-    count = 0
-    for s_name, channel_id in SLOT_LIST_CHANNELS.items():
-        if target_slot and s_name != target_slot: continue
-        role_name = SLOT_ROLES.get(s_name)
-        if not role_name: continue
-        role = discord.utils.get(ctx.guild.roles, name=role_name)
-        channel = ctx.guild.get_channel(channel_id)
-        room_channel_id = ROOM_CHANNELS.get(s_name)
-        room_channel = ctx.guild.get_channel(room_channel_id) if room_channel_id else None
-        if role and channel:
-            room_link = room_channel.mention if room_channel else "the room channel"
-            await channel.send(
-                f"⚠️ {role.mention} **ATTENTION!** ⚠️\n"
-                f"Match is starting in **{minutes} minutes**!\n"
-                f"Please check {room_link} for ID & Password."
-            )
-            count += 1
-    await ctx.send(f"✅ Notification sent to {count} channels.", delete_after=5)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-@is_admin_channel()
-async def lock(ctx):
-    global REGISTRATION_OPEN
-    REGISTRATION_OPEN = False
-    await ctx.send("⛔ **SYSTEM LOCKED.**")
-    reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
-    if reg_ch: await reg_ch.send("⛔ **REGISTRATION CLOSED.**")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-@is_admin_channel()
-async def unlock(ctx):
-    global REGISTRATION_OPEN
-    REGISTRATION_OPEN = True
-    await ctx.send("✅ **SYSTEM UNLOCKED.** Registration is open.")
-
-if __name__ == "__main__":
-    keep_alive.keep_alive()  
-    bot.run(TOKEN)
+if **name** == “**main**”:
+if BOT_TOKEN == “YOUR_BOT_TOKEN_HERE”:
+print(“❌ ERROR: Please set your BOT_TOKEN in the .env file!”)
+else:
+bot.run(BOT_TOKEN)
