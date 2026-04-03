@@ -1,3 +1,6 @@
-discord.py>=2.3.0
-pytz>=2023.3
-python-dotenv>=1.0.0
+# Core Discord Bot Library
+discord.py>=2.3.2
+
+# Web Server (for keep_alive functionality)
+Flask>=3.0.0
+
