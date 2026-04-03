@@ -823,7 +823,7 @@ await ctx.send(embed=error_embed(f”An unexpected error occurred:\n`{error}`”
 # ──────────────────────────────────────────────────────────────────
 
 if **name** == “**main**”:
-if BOT_TOKEN == “YOUR_BOT_TOKEN_HERE”:
+if BOT_TOKEN == “MTQ1OTE2NDczMjAzMTI0MjM0Nw.G1atbN.84lSLurSyPKzI2cNeSSLFQmjz8VJrFVf6I-0Lo”:
 print(“❌ ERROR: Please set your BOT_TOKEN in the .env file!”)
 else:
 bot.run(BOT_TOKEN)
