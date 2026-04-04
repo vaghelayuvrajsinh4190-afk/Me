@@ -1359,21 +1359,23 @@ class HelpDropdown(discord.ui.Select):
         )
 
     def _match(self):
-        return make_embed(
-            "🔧 Match Management",
-            f"{Theme.SEP}\n\n"
-            "**`!setup`** — Initialize all bot panels\n"
-            "**`!setup_verify`** — Setup verification panel\n"
-            "**`!init_tables`** — Refresh all live tables\n"
-            "**`!lock`** / **`!unlock`** — Toggle registration\n"
-            "**`!notify_start mins [MATCH_X]`** — Alert players\n"
-            "**`!force_remove MATCH_X slot#`** — Remove a team\n"
-            "**`!reset_match MATCH_X`** — Clear all slots\n"
-            "**`!remove_role @user @role`** — Remove a role from player\n"
-            "**`!unverify @user`** — Remove verified role\n"
-            "**`!clear [count]`** — Purge messages",
-            Theme.ROSE
-        )
+    return make_embed(
+        "🔧 Match Management",
+        f"{Theme.SEP}\n\n"
+        "**`!setup`** — Initialize all bot panels\n"
+        "**`!setup_verify`** — Setup verification panel\n"
+        "**`!init_tables`** — Refresh all live tables\n"
+        "**`!lock`** / **`!unlock`** — Toggle registration\n"
+        "**`!notify_start mins [MATCH_X]`** — Alert players\n"
+        "**`!force_remove MATCH_X slot#`** — Remove a team\n"
+        "**`!reset_match MATCH_X`** — Clear all slots\n"
+        "**`!add_role @user @role`** — Add a role to player\n"
+        "**`!remove_role @user @role`** — Remove a role from player\n"
+        "**`!unverify @user`** — Remove verified role\n"
+        "**`!clear [count]`** — Purge messages",
+        Theme.ROSE
+    )
+
 
     def _data(self):
         return make_embed(
