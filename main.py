@@ -676,7 +676,7 @@ async def on_ready():
     if not daily_reset_task.is_running():
         daily_reset_task.start()
 
-@bot.command()
+@bot.command(aliases=["c", "purge"])
 @commands.has_permissions(administrator=True)
 async def clear(ctx, amount: int = 100):
     """Clear messages from the current channel."""
@@ -690,7 +690,7 @@ async def clear(ctx, amount: int = 100):
         e = make_embed("❌ Clear Failed", f"`{err}`", Theme.ERROR)
         await ctx.send(embed=e, delete_after=5)
 
-@bot.command()
+@bot.command(aliases=["sv"])
 @commands.has_permissions(administrator=True)
 async def setup_verify(ctx):
     """Setup the verification panel."""
@@ -716,7 +716,7 @@ async def setup_verify(ctx):
     await ctx.send(embed=embed, view=PersistentVerifyView())
     await ctx.message.delete()
 
-@bot.command()
+@bot.command(aliases=["fr", "rm"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def force_remove(ctx, match_name: str, slot_number: int):
@@ -747,7 +747,7 @@ async def force_remove(ctx, match_name: str, slot_number: int):
     )
     await ctx.send(embed=e)
 
-@bot.command()
+@bot.command(aliases=["set"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def setup(ctx):
@@ -800,7 +800,7 @@ async def setup(ctx):
 
     await msg.edit(embed=make_embed("✅ Setup Complete!", "`▰▰▰▰▰` All panels are live.", Theme.SUCCESS))
 
-@bot.command()
+@bot.command(aliases=["it"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def init_tables(ctx):
@@ -812,7 +812,7 @@ async def init_tables(ctx):
         await asyncio.sleep(1) 
     await msg.edit(embed=make_embed("✅ Tables Live", "All match tables have been refreshed.", Theme.SUCCESS))
 
-@bot.command()
+@bot.command(aliases=["ns", "alert"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def notify_start(ctx, minutes: int, slot_name: str = None):
@@ -846,7 +846,7 @@ async def notify_start(ctx, minutes: int, slot_name: str = None):
     e = make_embed("✅ Notifications Sent", f"Alerted **{count}** match channel(s).", Theme.SUCCESS)
     await ctx.send(embed=e, delete_after=5)
 
-@bot.command()
+@bot.command(aliases=["l"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def lock(ctx):
@@ -864,7 +864,7 @@ async def lock(ctx):
         lock_e = make_embed("⛔ Registration Closed", "Slot claims are temporarily disabled. Stay tuned!", Theme.ERROR)
         await reg_ch.send(embed=lock_e)
 
-@bot.command()
+@bot.command(aliases=["ul"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def unlock(ctx):
@@ -879,7 +879,7 @@ async def unlock(ctx):
     await ctx.send(embed=e)
 
 # ═══════════════════ 10. ANNOUNCEMENT SYSTEM ═══════════════════
-@bot.command()
+@bot.command(aliases=["ann"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def announce(ctx, channel: discord.TextChannel, *, message: str):
@@ -895,7 +895,7 @@ async def announce(ctx, channel: discord.TextChannel, *, message: str):
     await ctx.send(embed=e, delete_after=5)
     await ctx.message.delete()
 
-@bot.command()
+@bot.command(aliases=["am"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def announce_match(ctx, match_name: str, *, message: str):
@@ -922,7 +922,7 @@ async def announce_match(ctx, match_name: str, *, message: str):
     await ctx.send(embed=make_embed("✅ Sent", f"Delivered to {channel.mention}", Theme.SUCCESS), delete_after=5)
     await ctx.message.delete()
 
-@bot.command()
+@bot.command(aliases=["sch"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def schedule(ctx, match_name: str, time: str, map_name: str = "TBD", mode: str = "TBD"):
@@ -951,7 +951,7 @@ async def schedule(ctx, match_name: str, time: str, map_name: str = "TBD", mode:
     await ctx.send(embed=make_embed("✅ Schedule Posted", f"Sent to {channel.mention}", Theme.SUCCESS), delete_after=5)
     await ctx.message.delete()
 
-@bot.command()
+@bot.command(aliases=["r"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def room(ctx, match_name: str, room_id: str, password: str):
@@ -979,7 +979,7 @@ async def room(ctx, match_name: str, room_id: str, password: str):
     await ctx.message.delete()
 
 # ═══════════════════ 11. SMART COMMANDS ═══════════════════
-@bot.command(name="status")
+@bot.command(name="status", aliases=["st"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def bot_status(ctx):
@@ -1009,7 +1009,7 @@ async def bot_status(ctx):
         )
     await ctx.send(embed=embed)
 
-@bot.command(name="myteam")
+@bot.command(name="myteam", aliases=["mt"])
 async def my_team(ctx):
     """View your own team info and booked matches."""
     uid = str(ctx.author.id)
@@ -1035,7 +1035,7 @@ async def my_team(ctx):
         embed.set_footer(text=f"Registered: {last[:10]} • {Theme.FOOTER}")
     await ctx.send(embed=embed, delete_after=30)
 
-@bot.command()
+@bot.command(aliases=["ti", "info"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def teaminfo(ctx, *, team_name: str):
@@ -1061,7 +1061,7 @@ async def teaminfo(ctx, *, team_name: str):
             return
     await ctx.send(embed=make_embed("❌ Not Found", f"No team found with name **{team_name}**.", Theme.ERROR))
 
-@bot.command()
+@bot.command(aliases=["wi"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def whois(ctx, member: discord.Member):
@@ -1089,7 +1089,7 @@ async def whois(ctx, member: discord.Member):
     await ctx.send(embed=make_embed("❌ Not Found", f"**{member.display_name}** is not registered in any team.", Theme.ERROR))
 
 # ═══════════════════ 12. DATA MANAGEMENT ═══════════════════
-@bot.command()
+@bot.command(aliases=["ut", "rename"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def update_team(ctx, member: discord.Member, *, new_name: str):
@@ -1114,7 +1114,7 @@ async def update_team(ctx, member: discord.Member, *, new_name: str):
     e = make_embed("✅ Team Renamed", f"**{old_name}** → **{new_name}**", Theme.SUCCESS)
     await ctx.send(embed=e)
 
-@bot.command()
+@bot.command(aliases=["ss", "swap"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def swap_slot(ctx, match_name: str, slot1: int, slot2: int):
@@ -1141,7 +1141,7 @@ async def swap_slot(ctx, match_name: str, slot1: int, slot2: int):
     )
     await ctx.send(embed=e)
 
-@bot.command()
+@bot.command(aliases=["mtm", "move"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def move_team(ctx, member: discord.Member, from_match: str, to_match: str):
@@ -1175,7 +1175,7 @@ async def move_team(ctx, member: discord.Member, from_match: str, to_match: str)
     )
     await ctx.send(embed=e)
 
-@bot.command()
+@bot.command(aliases=["rsm"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def reset_match(ctx, match_name: str):
@@ -1190,6 +1190,55 @@ async def reset_match(ctx, match_name: str):
     display = match_key.replace('_', ' ')
     e = make_embed("🔄 Match Reset", f"**{display}** cleared. **{len(uids)}** teams removed.", Theme.ORANGE)
     await ctx.send(embed=e)
+
+@bot.command(aliases=["ar"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def add_role(ctx, member: discord.Member, *, role: discord.Role):
+    """Add a specific role to a player."""
+    if role in member.roles:
+        await ctx.send(embed=make_embed("⚠️ Info", f"{member.mention} already has the `{role.name}` role.", Theme.WARNING))
+        return
+    try:
+        await member.add_roles(role)
+        e = make_embed("✅ Role Added", f"Successfully added `{role.name}` to {member.mention}.", Theme.SUCCESS)
+        await ctx.send(embed=e)
+    except discord.Forbidden:
+        await ctx.send(embed=make_embed("❌ Error", "Missing permissions. Check role hierarchy.", Theme.ERROR))
+
+@bot.command(aliases=["rr"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def remove_role(ctx, member: discord.Member, *, role: discord.Role):
+    """Remove a specific role from a player."""
+    if role not in member.roles:
+        await ctx.send(embed=make_embed("⚠️ Info", f"{member.mention} does not have the `{role.name}` role.", Theme.WARNING))
+        return
+    try:
+        await member.remove_roles(role)
+        e = make_embed("✅ Role Removed", f"Successfully removed `{role.name}` from {member.mention}.", Theme.SUCCESS)
+        await ctx.send(embed=e)
+    except discord.Forbidden:
+        await ctx.send(embed=make_embed("❌ Error", "Missing permissions. Check role hierarchy.", Theme.ERROR))
+
+@bot.command(aliases=["uv"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def unverify(ctx, member: discord.Member):
+    """Remove the Verified Team role from a player."""
+    role = discord.utils.get(ctx.guild.roles, name=VERIFY_ROLE_NAME)
+    if not role:
+        await ctx.send(embed=make_embed("❌ Error", f"Role `{VERIFY_ROLE_NAME}` not found.", Theme.ERROR))
+        return
+    if role not in member.roles:
+        await ctx.send(embed=make_embed("⚠️ Info", f"{member.mention} is not verified.", Theme.WARNING))
+        return
+    try:
+        await member.remove_roles(role)
+        e = make_embed("✅ Unverified", f"Removed the **{VERIFY_ROLE_NAME}** role from {member.mention}.", Theme.SUCCESS)
+        await ctx.send(embed=e)
+    except discord.Forbidden:
+        await ctx.send(embed=make_embed("❌ Error", "Missing permissions to remove the verified role.", Theme.ERROR))
 
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -1320,6 +1369,8 @@ class HelpDropdown(discord.ui.Select):
             "**`!notify_start mins [MATCH_X]`** — Alert players\n"
             "**`!force_remove MATCH_X slot#`** — Remove a team\n"
             "**`!reset_match MATCH_X`** — Clear all slots\n"
+            "**`!remove_role @user @role`** — Remove a role from player\n"
+            "**`!unverify @user`** — Remove verified role\n"
             "**`!clear [count]`** — Purge messages",
             Theme.ROSE
         )
