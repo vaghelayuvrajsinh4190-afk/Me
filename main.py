@@ -51,6 +51,13 @@ REGISTRATION_OPEN = True
 TIMEZONE_OFFSET = 5.5 # India Standard Time
 DATA_EXPIRY_DAYS = 7  # Delete team data after 7 days
 
+# --- DEFAULT UPI SETTINGS (update via !setupi command in Discord) ---
+DEFAULT_UPI_SETTINGS = {
+    "upi_id": "yourname@upi",
+    "upi_name": "Your Name",
+    "payment_amount": 10
+}
+
 # ═══════════════════ DESIGN SYSTEM ═══════════════════
 class Theme:
     # Core palette
@@ -102,7 +109,8 @@ def load_data():
         default_data = {
             "teams": {}, 
             "slots": {k: [] for k in SLOT_LIST_CHANNELS},
-            "table_messages": {} 
+            "table_messages": {},
+            "upi_settings": DEFAULT_UPI_SETTINGS.copy()
         }
         with open(DATA_FILE, "w") as f:
             json.dump(default_data, f, indent=4)
@@ -112,7 +120,9 @@ def load_data():
         data = json.load(f)
         if "table_messages" not in data:
             data["table_messages"] = {}
-        if "SLOT_1" in data["slots"]:
+        if "upi_settings" not in data:
+            data["upi_settings"] = DEFAULT_UPI_SETTINGS.copy()
+        if "SLOT_1" in data.get("slots", {}):
             new_slots = {k.replace("SLOT", "MATCH"): v for k, v in data["slots"].items()}
             data["slots"] = new_slots
             save_data(data)
@@ -124,13 +134,46 @@ def save_data(data):
 
 data = load_data()
 
+def get_upi_settings():
+    return data.get("upi_settings", DEFAULT_UPI_SETTINGS)
+
+def make_payment_embed(team_name):
+    """Create the payment instructions embed shown after registration."""
+    upi = get_upi_settings()
+    embed = make_embed(
+        "💳 Payment Required",
+        f"{Theme.SEP}\n\n"
+        f"✅ Team **{team_name}** registered successfully!\n\n"
+        f"{Theme.THIN_SEP}\n\n"
+        f"**📱 Pay Platform Fee to activate your team:**\n"
+        f"> 💰 **Amount:** `₹{upi['payment_amount']}`\n"
+        f"> 🏦 **UPI ID:** `{upi['upi_id']}`\n"
+        f"> 👤 **Pay to:** `{upi['upi_name']}`\n\n"
+        f"{Theme.THIN_SEP}\n\n"
+        f"**📋 How to complete payment:**\n"
+        f"> `1.` Pay ₹{upi['payment_amount']} to the UPI ID above\n"
+        f"> `2.` Take a screenshot of the payment\n"
+        f"> `3.` Open a ticket in the server\n"
+        f"> `4.` Send the screenshot to admin\n"
+        f"> `5.` Wait for admin approval\n\n"
+        f"⏳ *Your team will be added to all matches once payment is verified.*\n\n"
+        f"{Theme.SEP}",
+        Theme.GOLD,
+        "💰 Manual UPI Verification"
+    )
+    return embed
+
+def is_paid(uid):
+    """Check if a user has paid the platform fee."""
+    return data.get("teams", {}).get(uid, {}).get("paid", False)
+
 # ================= 3. HELPER FUNCTIONS =================
 async def get_or_create_role(guild, role_name):
     role = discord.utils.get(guild.roles, name=role_name)
     if not role:
         try:
             role = await guild.create_role(name=role_name, mentionable=True)
-        except: return None
+        except Exception: return None
     return role
 
 async def setup_channel_perms(guild):
@@ -262,7 +305,7 @@ async def add_player_to_slot(interaction, slot_name):
         role = await get_or_create_role(guild, role_name)
         if role:
             try: await interaction.user.add_roles(role)
-            except: pass
+            except Exception: pass
 
     await refresh_table(guild, slot_name)
     return True
@@ -282,7 +325,7 @@ async def perform_removal(guild, uid, slot_name):
         member = guild.get_member(int(uid))
         if role and member:
             try: await member.remove_roles(role)
-            except: pass
+            except Exception: pass
 
     await refresh_table(guild, slot_name)
 
@@ -326,11 +369,13 @@ async def daily_reset_task():
                     member = guild.get_member(int(uid))
                     if member:
                         try: await member.remove_roles(role)
-                        except: pass
+                        except Exception: pass
             data["slots"][slot_name] = [] 
 
+        # Reset paid flag and booked slots for all teams
         for uid in data["teams"]:
             data["teams"][uid]["booked_slots"] = []
+            data["teams"][uid]["paid"] = False
 
         uids_to_delete = []
         for uid, info in data["teams"].items():
@@ -462,6 +507,7 @@ class TeamModal(discord.ui.Modal, title="📋 Squad Registration"):
             "team": self.team.value,
             "players": [p for p in players_input if p], 
             "booked_slots": [],
+            "paid": False,
             "last_updated": datetime.datetime.utcnow().isoformat()
         }
         save_data(data)
@@ -473,16 +519,11 @@ class TeamModal(discord.ui.Modal, title="📋 Squad Registration"):
             log_e.add_field(name="👤 Leader", value=f"<@{uid}>", inline=True)
             players_str = ", ".join([p for p in players_input if p]) or "Solo"
             log_e.add_field(name="👥 Roster", value=players_str, inline=False)
+            log_e.add_field(name="💰 Payment", value="❌ Pending", inline=True)
             await log_channel.send(embed=log_e)
 
-        players_list = [p for p in players_input if p]
-        roster = "\n".join([f"` {i+1} ` {p}" for i, p in enumerate(players_list)]) or "Solo player"
-        e = make_embed(
-            f"✅ Team Registered — {self.team.value}",
-            f"{Theme.SEP}\n\n**Squad Roster:**\n{roster}\n\n{Theme.THIN_SEP}\n🎮 **Select a match below to claim your slot!**",
-            Theme.SUCCESS
-        )
-        await interaction.response.send_message(embed=e, view=SlotSelectView(), ephemeral=True)
+        # Show payment instructions instead of slot buttons
+        await interaction.response.send_message(embed=make_payment_embed(self.team.value), ephemeral=True)
 
 class SlotButton(discord.ui.Button):
     def __init__(self, slot):
@@ -500,6 +541,11 @@ class SlotButton(discord.ui.Button):
         self.slot = slot
 
     async def callback(self, interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        if not is_paid(uid):
+            team_name = data.get("teams", {}).get(uid, {}).get("team", "your team")
+            await interaction.response.send_message(embed=make_payment_embed(team_name), ephemeral=True)
+            return
         success = await add_player_to_slot(interaction, self.slot)
         if success:
             display = self.slot.replace('_', ' ')
@@ -536,6 +582,10 @@ class AutoClaimView(discord.ui.View):
             e = make_embed("❌ Not Registered", "You must register your team first before claiming a slot.", Theme.ERROR)
             await interaction.response.send_message(embed=e, ephemeral=True)
             return
+        if not is_paid(uid):
+            team_name = data["teams"][uid].get("team", "your team")
+            await interaction.response.send_message(embed=make_payment_embed(team_name), ephemeral=True)
+            return
         assigned = None
         for slot_name in SLOT_LIST_CHANNELS:
             if len(data["slots"][slot_name]) < MAX_SLOTS and uid not in data["slots"][slot_name]:
@@ -558,6 +608,10 @@ class TeamChoiceView(discord.ui.View):
 
     @discord.ui.button(label="✅ Continue with this team", style=discord.ButtonStyle.success)
     async def continue_old(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+        if not is_paid(uid):
+            await interaction.response.send_message(embed=make_payment_embed(self.team_name), ephemeral=True)
+            return
         e = make_embed(
             f"🏷️ Using Team — {self.team_name}",
             f"Select a match below to claim your slot.",
@@ -589,11 +643,12 @@ class MainRegisterView(discord.ui.View):
             info = data["teams"][uid]
             players = info.get("players", [])
             booked = info.get("booked_slots", [])
+            paid_status = "✅ Approved" if info.get("paid", False) else "❌ Pending Payment"
             roster = "\n".join([f"` {i+1} ` {p}" for i, p in enumerate(players)]) or "No players"
             matches = ", ".join([s.replace('_', ' ') for s in booked]) if booked else "None"
             e = make_embed(
                 f"⚠️ Already Registered — {team_name}",
-                f"{Theme.SEP}\n\n**Squad Roster:**\n{roster}\n\n**Active Matches:** {matches}\n\n{Theme.THIN_SEP}\n*Choose an option below:*",
+                f"{Theme.SEP}\n\n**Squad Roster:**\n{roster}\n\n**Active Matches:** {matches}\n**Payment:** {paid_status}\n\n{Theme.THIN_SEP}\n*Choose an option below:*",
                 Theme.WARNING
             )
             await interaction.response.send_message(embed=e, view=TeamChoiceView(team_name), ephemeral=True)
@@ -644,6 +699,10 @@ class CancelAndClaimView(discord.ui.View):
         if uid not in data["teams"]:
             e = make_embed("❌ Not Registered", "Register your team first before joining a match.", Theme.ERROR)
             await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+        if not is_paid(uid):
+            team_name = data["teams"][uid].get("team", "your team")
+            await interaction.response.send_message(embed=make_payment_embed(team_name), ephemeral=True)
             return
         e = make_embed("🎮 Available Matches", "Select a match below to claim your slot.", Theme.ACCENT)
         await interaction.response.send_message(embed=e, view=SlotSelectView(), ephemeral=True)
@@ -878,6 +937,223 @@ async def unlock(ctx):
     )
     await ctx.send(embed=e)
 
+# ═══════════════════ 9B. PAYMENT ADMIN COMMANDS ═══════════════════
+
+@bot.command(aliases=["ap"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def approve(ctx, member: discord.Member):
+    """Approve a player's payment — auto-adds to all 4 matches, assigns roles, sends DM."""
+    uid = str(member.id)
+    if uid not in data["teams"]:
+        await ctx.send(embed=make_embed("❌ Not Found", f"{member.mention} has no registered team.", Theme.ERROR))
+        return
+    
+    if data["teams"][uid].get("paid", False):
+        await ctx.send(embed=make_embed("⚠️ Already Approved", f"{member.mention}'s payment is already approved.", Theme.WARNING))
+        return
+    
+    # Set paid
+    data["teams"][uid]["paid"] = True
+    data["teams"][uid]["last_updated"] = datetime.datetime.utcnow().isoformat()
+    
+    # Auto-add to all 4 matches
+    added = []
+    skipped = []
+    already_in = []
+    for slot_name in SLOT_LIST_CHANNELS:
+        if uid in data["slots"][slot_name]:
+            already_in.append(slot_name)
+        elif len(data["slots"][slot_name]) >= MAX_SLOTS:
+            skipped.append(slot_name)
+        else:
+            data["slots"][slot_name].append(uid)
+            if "booked_slots" not in data["teams"][uid]:
+                data["teams"][uid]["booked_slots"] = []
+            if slot_name not in data["teams"][uid]["booked_slots"]:
+                data["teams"][uid]["booked_slots"].append(slot_name)
+            added.append(slot_name)
+    
+    save_data(data)
+    
+    # Assign roles for added matches
+    for slot_name in added:
+        role_name = SLOT_ROLES.get(slot_name)
+        if role_name:
+            role = await get_or_create_role(ctx.guild, role_name)
+            if role:
+                try: await member.add_roles(role)
+                except Exception: pass
+    
+    # Refresh all tables
+    for slot_name in SLOT_LIST_CHANNELS:
+        await refresh_table(ctx.guild, slot_name)
+        await asyncio.sleep(0.5)
+    
+    # Build status strings
+    team_name = data["teams"][uid]["team"]
+    added_str = ", ".join([s.replace("_", " ") for s in added]) or "None"
+    skipped_str = ", ".join([s.replace("_", " ") for s in skipped]) or "None"
+    
+    # Admin confirmation
+    admin_embed = make_embed(
+        "✅ Payment Approved",
+        f"{Theme.SEP}\n\n"
+        f"**Team:** {team_name}\n"
+        f"**Leader:** {member.mention}\n\n"
+        f"**✅ Added to:** {added_str}\n"
+        f"**🔴 Skipped (Full):** {skipped_str}\n\n"
+        f"**Approved by:** {ctx.author.mention}",
+        Theme.SUCCESS
+    )
+    await ctx.send(embed=admin_embed)
+    
+    # Log to admin log channel
+    log_ch = ctx.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if log_ch:
+        await log_ch.send(embed=admin_embed)
+    
+    # DM to player
+    try:
+        dm_desc = (
+            f"{Theme.SEP}\n\n"
+            f"Your payment for team **{team_name}** has been verified! ✅\n\n"
+            f"**Matches Joined:** {added_str}\n"
+        )
+        if skipped:
+            dm_desc += f"⚠️ **Full Matches (skipped):** {skipped_str}\n"
+        dm_desc += f"\n{Theme.THIN_SEP}\n*Check the match channels for room details before the match starts.*"
+        
+        dm_embed = make_embed("✅ Payment Approved!", dm_desc, Theme.SUCCESS, "💰 Payment Verified")
+        await member.send(embed=dm_embed)
+    except Exception:
+        await ctx.send(embed=make_embed("⚠️ DM Failed", f"Could not DM {member.mention}. They may have DMs disabled.", Theme.WARNING))
+
+@bot.command(aliases=["uap"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def unapprove(ctx, member: discord.Member):
+    """Reverse a payment approval — removes from all matches, removes roles."""
+    uid = str(member.id)
+    if uid not in data["teams"]:
+        await ctx.send(embed=make_embed("❌ Not Found", f"{member.mention} has no registered team.", Theme.ERROR))
+        return
+    
+    if not data["teams"][uid].get("paid", False):
+        await ctx.send(embed=make_embed("⚠️ Not Approved", f"{member.mention}'s payment was not approved.", Theme.WARNING))
+        return
+    
+    # Set unpaid
+    data["teams"][uid]["paid"] = False
+    team_name = data["teams"][uid]["team"]
+    
+    # Remove from all matches
+    booked = list(data["teams"][uid].get("booked_slots", []))
+    for slot_name in booked:
+        await perform_removal(ctx.guild, uid, slot_name)
+    
+    save_data(data)
+    
+    removed_str = ", ".join([s.replace("_", " ") for s in booked]) or "None"
+    
+    e = make_embed(
+        "🔄 Payment Unapproved",
+        f"{Theme.SEP}\n\n"
+        f"**Team:** {team_name}\n"
+        f"**Leader:** {member.mention}\n"
+        f"**Removed from:** {removed_str}\n\n"
+        f"**By:** {ctx.author.mention}",
+        Theme.ORANGE
+    )
+    await ctx.send(embed=e)
+    
+    log_ch = ctx.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if log_ch:
+        await log_ch.send(embed=e)
+    
+    # DM to player
+    try:
+        dm_e = make_embed(
+            "⚠️ Payment Reversed",
+            f"Your payment approval for team **{team_name}** has been reversed.\n"
+            f"You have been removed from all matches.\n\n"
+            f"*Contact admin if this is a mistake.*",
+            Theme.ORANGE
+        )
+        await member.send(embed=dm_e)
+    except Exception:
+        pass
+
+@bot.command(aliases=["pd"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def pending(ctx):
+    """Show all teams with pending (unpaid) payments."""
+    pending_teams = []
+    for uid, info in data["teams"].items():
+        if not info.get("paid", False):
+            team_name = info.get("team", "Unknown")
+            reg_time = info.get("last_updated", "Unknown")[:16]
+            pending_teams.append(f"• **{team_name}** — <@{uid}> (Registered: `{reg_time}`)")
+    
+    if not pending_teams:
+        await ctx.send(embed=make_embed("✅ No Pending Payments", "All registered teams have been approved!", Theme.SUCCESS))
+        return
+    
+    desc = f"{Theme.SEP}\n\n" + "\n".join(pending_teams) + f"\n\n{Theme.THIN_SEP}\n**Total:** `{len(pending_teams)}` pending\n\nUse `!approve @user` to approve."
+    
+    # Handle long messages
+    if len(desc) > 4000:
+        chunks = [pending_teams[i:i+15] for i in range(0, len(pending_teams), 15)]
+        for i, chunk in enumerate(chunks):
+            chunk_desc = f"{Theme.SEP}\n\n" + "\n".join(chunk)
+            title = f"💰 Pending Payments ({i+1}/{len(chunks)})"
+            await ctx.send(embed=make_embed(title, chunk_desc, Theme.GOLD))
+    else:
+        await ctx.send(embed=make_embed("💰 Pending Payments", desc, Theme.GOLD))
+
+@bot.command(aliases=["supi"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def setupi(ctx, upi_id: str, amount: int, *, name: str):
+    """Set UPI payment details. Usage: !setupi <upi_id> <amount> <name>"""
+    data["upi_settings"] = {
+        "upi_id": upi_id,
+        "upi_name": name,
+        "payment_amount": amount
+    }
+    save_data(data)
+    
+    e = make_embed(
+        "✅ UPI Settings Updated",
+        f"{Theme.SEP}\n\n"
+        f"**UPI ID:** `{upi_id}`\n"
+        f"**Name:** `{name}`\n"
+        f"**Amount:** `₹{amount}`\n\n"
+        f"{Theme.THIN_SEP}\n"
+        f"*These details will be shown to players during registration.*",
+        Theme.SUCCESS
+    )
+    await ctx.send(embed=e)
+
+@bot.command(aliases=["vupi"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def viewupi(ctx):
+    """View current UPI payment settings."""
+    upi = get_upi_settings()
+    e = make_embed(
+        "💳 Current UPI Settings",
+        f"{Theme.SEP}\n\n"
+        f"**UPI ID:** `{upi['upi_id']}`\n"
+        f"**Name:** `{upi['upi_name']}`\n"
+        f"**Amount:** `₹{upi['payment_amount']}`\n\n"
+        f"{Theme.THIN_SEP}\n"
+        f"*Use `!setupi <upi_id> <amount> <name>` to change.*",
+        Theme.GOLD
+    )
+    await ctx.send(embed=e)
+
 # ═══════════════════ 10. ANNOUNCEMENT SYSTEM ═══════════════════
 @bot.command(aliases=["ann"])
 @commands.has_permissions(administrator=True)
@@ -920,6 +1196,30 @@ async def announce_match(ctx, match_name: str, *, message: str):
     ping = role.mention if role else ""
     await channel.send(content=ping, embed=embed)
     await ctx.send(embed=make_embed("✅ Sent", f"Delivered to {channel.mention}", Theme.SUCCESS), delete_after=5)
+    await ctx.message.delete()
+
+@bot.command(aliases=["aa"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def announce_all(ctx, *, message: str):
+    """Broadcast an announcement to ALL match channels with role pings."""
+    count = 0
+    for slot_name, channel_id in SLOT_LIST_CHANNELS.items():
+        channel = ctx.guild.get_channel(channel_id)
+        role = discord.utils.get(ctx.guild.roles, name=SLOT_ROLES.get(slot_name))
+        if not channel: continue
+        display = slot_name.replace("_", " ")
+        embed = make_embed(
+            f"📣 {display} — Announcement",
+            f"{Theme.SEP}\n\n{message}\n\n{Theme.SEP}",
+            Theme.GOLD,
+            f"By {ctx.author.display_name}"
+        )
+        ping = role.mention if role else ""
+        await channel.send(content=ping, embed=embed)
+        count += 1
+        await asyncio.sleep(0.5)
+    await ctx.send(embed=make_embed("✅ Broadcast Sent", f"Delivered to **{count}** match channels.", Theme.SUCCESS), delete_after=5)
     await ctx.message.delete()
 
 @bot.command(aliases=["sch"])
@@ -1020,12 +1320,14 @@ async def my_team(ctx):
     info = data["teams"][uid]
     booked = info.get("booked_slots", [])
     players = info.get("players", [])
+    paid_status = "✅ Approved" if info.get("paid", False) else "❌ Pending Payment"
     roster = "\n".join([f"` {i+1} ` {p}" for i, p in enumerate(players)]) or "No players added"
     match_list = "\n".join([f"• {s.replace('_', ' ')}" for s in booked]) if booked else "*No matches booked*"
     embed = make_embed(
         f"🏷️ {info['team']}",
         f"{Theme.SEP}\n\n"
         f"**👥 Squad Roster:**\n{roster}\n\n"
+        f"**💰 Payment:** {paid_status}\n\n"
         f"{Theme.THIN_SEP}\n\n"
         f"**🎮 Active Matches:**\n{match_list}",
         Theme.TEAL
@@ -1045,13 +1347,15 @@ async def teaminfo(ctx, *, team_name: str):
         if info.get("team", "").strip().lower() == search:
             players = info.get("players", [])
             booked = info.get("booked_slots", [])
+            paid_status = "✅ Approved" if info.get("paid", False) else "❌ Pending"
             roster = "\n".join([f"` {i+1} ` {p}" for i, p in enumerate(players)]) or "None"
             matches = "\n".join([f"• {s.replace('_', ' ')}" for s in booked]) if booked else "None"
             embed = make_embed(
                 f"🔍 Team — {info['team']}",
                 f"{Theme.SEP}\n\n"
                 f"**👤 Leader:** <@{uid}>\n"
-                f"**🆔 User ID:** `{uid}`\n\n"
+                f"**🆔 User ID:** `{uid}`\n"
+                f"**💰 Payment:** {paid_status}\n\n"
                 f"**👥 Players:**\n{roster}\n\n"
                 f"{Theme.THIN_SEP}\n\n"
                 f"**🎮 Matches:**\n{matches}",
@@ -1165,7 +1469,7 @@ async def move_team(ctx, member: discord.Member, from_match: str, to_match: str)
     new_role = await get_or_create_role(ctx.guild, SLOT_ROLES.get(tk))
     if new_role:
         try: await member.add_roles(new_role)
-        except: pass
+        except Exception: pass
     await refresh_table(ctx.guild, tk)
     team = data["teams"].get(uid, {}).get("team", "?")
     e = make_embed(
@@ -1282,7 +1586,8 @@ async def export_data(ctx):
         team = info.get("team", "?")
         players = ", ".join(info.get("players", [])) or "None"
         booked = ", ".join([s.replace('_',' ') for s in info.get("booked_slots", [])]) or "None"
-        lines.append(f"• **{team}** │ <@{uid}> │ {players} │ {booked}")
+        paid = "✅" if info.get("paid", False) else "❌"
+        lines.append(f"• **{team}** │ <@{uid}> │ {players} │ {booked} │ {paid}")
     output = "\n".join(lines)
     if len(output) > 1900:
         chunks = [output[i:i+1900] for i in range(0, len(output), 1900)]
@@ -1302,6 +1607,7 @@ class HelpDropdown(discord.ui.Select):
         ]
         if is_admin:
             options.extend([
+                discord.SelectOption(label="Payment Management", description="Approve, pending, UPI settings", emoji="💰", value="payment"),
                 discord.SelectOption(label="Announcements", description="Announce & schedule", emoji="📢", value="announce"),
                 discord.SelectOption(label="Match Management", description="Setup, lock, notify", emoji="🔧", value="match"),
                 discord.SelectOption(label="Data & Lookup", description="Stats, search, export", emoji="📊", value="data"),
@@ -1312,6 +1618,7 @@ class HelpDropdown(discord.ui.Select):
         pages = {
             "overview": self._overview,
             "player": self._player,
+            "payment": self._payment,
             "announce": self._announce,
             "match": self._match,
             "data": self._data,
@@ -1329,8 +1636,10 @@ class HelpDropdown(discord.ui.Select):
             "**🚀 Quick Start:**\n"
             "> `1.` Get verified in the verification channel\n"
             "> `2.` Register your team\n"
-            "> `3.` Claim a match slot\n"
-            "> `4.` Wait for room details before match\n\n"
+            "> `3.` Pay ₹ platform fee via UPI\n"
+            "> `4.` Open a ticket & send payment screenshot\n"
+            "> `5.` Admin approves → auto-added to all matches\n"
+            "> `6.` Wait for room details before match\n\n"
             "*Use the dropdown below to explore commands.*",
             Theme.PREMIUM
         )
@@ -1344,6 +1653,20 @@ class HelpDropdown(discord.ui.Select):
             f"{Theme.THIN_SEP}\n"
             "💡 *Use the buttons in registration & cancel channels for slot management.*",
             Theme.TEAL
+        )
+
+    def _payment(self):
+        return make_embed(
+            "💰 Payment Management",
+            f"{Theme.SEP}\n\n"
+            "**`!approve @user`** (`!ap`)\n╰ Approve payment → auto-add to all 4 matches + DM\n\n"
+            "**`!unapprove @user`** (`!uap`)\n╰ Reverse approval → remove from all matches\n\n"
+            "**`!pending`** (`!pd`)\n╰ Show all teams with unpaid payments\n\n"
+            "**`!setupi <upi_id> <amount> <name>`** (`!supi`)\n╰ Set UPI payment details shown to players\n\n"
+            "**`!viewupi`** (`!vupi`)\n╰ View current UPI settings\n\n"
+            f"{Theme.THIN_SEP}\n"
+            "💡 *Players register → pay via UPI → open ticket → admin approves*",
+            Theme.GOLD
         )
 
     def _announce(self):
@@ -1369,7 +1692,6 @@ class HelpDropdown(discord.ui.Select):
             "**`!notify_start mins [MATCH_X]`** — Alert players\n"
             "**`!force_remove MATCH_X slot#`** — Remove a team\n"
             "**`!reset_match MATCH_X`** — Clear all slots\n"
-            "**`!add_role @user @role`** — Add a role to player\n"
             "**`!remove_role @user @role`** — Remove a role from player\n"
             "**`!unverify @user`** — Remove verified role\n"
             "**`!clear [count]`** — Purge messages",
