@@ -5,6 +5,8 @@ import json
 import os
 import asyncio
 import datetime
+import time
+from collections import defaultdict
 import keep_alive
 
 # ================= 1. CONFIGURATION =================
@@ -16,10 +18,8 @@ REGISTRATION_CHANNEL_ID = 1458788627164303432
 CANCEL_CLAIM_CHANNEL_ID = 1459791046547472540
 ADMIN_LOG_CHANNEL_ID = 1459460369780047892
 VERIFY_CHANNEL_ID = 1461666929516347453
-VERIFIED_TEAM_LOG_ID = 1466725299675856947 
+VERIFIED_TEAM_LOG_ID = 1466725299675856947
 TICKET_CATEGORY_ID = 1458735077986009182
-
-
 
 # MATCH CHANNELS
 SLOT_LIST_CHANNELS = {
@@ -51,10 +51,14 @@ VERIFY_ROLE_NAME = "Verified Team"
 MAX_SLOTS = 16
 DATA_FILE = "data.json"
 REGISTRATION_OPEN = True
-TIMEZONE_OFFSET = 5.5 # India Standard Time
-DATA_EXPIRY_DAYS = 7  # Delete team data after 7 days
+TIMEZONE_OFFSET = 5.5
+DATA_EXPIRY_DAYS = 7
 
-# --- DEFAULT UPI SETTINGS (update via !setupi command in Discord) ---
+# --- ANTI SPAM ---
+click_cooldown = defaultdict(float)
+COOLDOWN_SECONDS = 3
+
+# --- DEFAULT UPI SETTINGS ---
 DEFAULT_UPI_SETTINGS = {
     "upi_id": "yourname@upi",
     "upi_name": "Your Name",
@@ -63,7 +67,6 @@ DEFAULT_UPI_SETTINGS = {
 
 # ═══════════════════ DESIGN SYSTEM ═══════════════════
 class Theme:
-    # Core palette
     SUCCESS   = discord.Color.from_rgb(87, 242, 135)
     ERROR     = discord.Color.from_rgb(237, 66, 69)
     WARNING   = discord.Color.from_rgb(254, 231, 92)
@@ -75,7 +78,6 @@ class Theme:
     ORANGE    = discord.Color.from_rgb(250, 168, 26)
     ROSE      = discord.Color.from_rgb(235, 69, 158)
     GOLD      = discord.Color.from_rgb(255, 215, 0)
-    # Decorative
     SEP       = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     THIN_SEP  = "─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
     FOOTER    = "⚡ Tournament Bot"
@@ -110,21 +112,24 @@ def make_embed(title, desc=None, color=None, footer=None):
 def load_data():
     if not os.path.exists(DATA_FILE):
         default_data = {
-            "teams": {}, 
+            "teams": {},
             "slots": {k: [] for k in SLOT_LIST_CHANNELS},
             "table_messages": {},
-            "upi_settings": DEFAULT_UPI_SETTINGS.copy()
+            "upi_settings": DEFAULT_UPI_SETTINGS.copy(),
+            "open_tickets": {}
         }
         with open(DATA_FILE, "w") as f:
             json.dump(default_data, f, indent=4)
         return default_data
-    
+
     with open(DATA_FILE, "r") as f:
         data = json.load(f)
         if "table_messages" not in data:
             data["table_messages"] = {}
         if "upi_settings" not in data:
             data["upi_settings"] = DEFAULT_UPI_SETTINGS.copy()
+        if "open_tickets" not in data:
+            data["open_tickets"] = {}
         if "SLOT_1" in data.get("slots", {}):
             new_slots = {k.replace("SLOT", "MATCH"): v for k, v in data["slots"].items()}
             data["slots"] = new_slots
@@ -140,8 +145,10 @@ data = load_data()
 def get_upi_settings():
     return data.get("upi_settings", DEFAULT_UPI_SETTINGS)
 
+def is_paid(uid):
+    return data.get("teams", {}).get(uid, {}).get("paid", False)
+
 def make_payment_embed(team_name):
-    """Create the payment instructions embed shown after registration."""
     upi = get_upi_settings()
     embed = make_embed(
         "💳 Payment Required",
@@ -156,8 +163,8 @@ def make_payment_embed(team_name):
         f"**📋 How to complete payment:**\n"
         f"> `1.` Pay ₹{upi['payment_amount']} to the UPI ID above\n"
         f"> `2.` Take a screenshot of the payment\n"
-        f"> `3.` Open a ticket in the server\n"
-        f"> `4.` Send the screenshot to admin\n"
+        f"> `3.` Click **Open Payment Ticket** button below\n"
+        f"> `4.` Send screenshot in the ticket channel\n"
         f"> `5.` Wait for admin approval\n\n"
         f"⏳ *Your team will be added to all matches once payment is verified.*\n\n"
         f"{Theme.SEP}",
@@ -166,30 +173,25 @@ def make_payment_embed(team_name):
     )
     return embed
 
-def is_paid(uid):
-    """Check if a user has paid the platform fee."""
-    return data.get("teams", {}).get(uid, {}).get("paid", False)
-
 # ================= 3. HELPER FUNCTIONS =================
 async def get_or_create_role(guild, role_name):
     role = discord.utils.get(guild.roles, name=role_name)
     if not role:
         try:
             role = await guild.create_role(name=role_name, mentionable=True)
-        except Exception: return None
+        except Exception:
+            return None
     return role
 
 async def setup_channel_perms(guild):
     for slot_name, role_name in SLOT_ROLES.items():
         role = await get_or_create_role(guild, role_name)
         if not role: continue
-
         channels_to_lock = []
         if slot_name in SLOT_LIST_CHANNELS:
             channels_to_lock.append(guild.get_channel(SLOT_LIST_CHANNELS[slot_name]))
         if slot_name in ROOM_CHANNELS:
             channels_to_lock.append(guild.get_channel(ROOM_CHANNELS[slot_name]))
-        
         for ch in channels_to_lock:
             if ch:
                 overwrites = {
@@ -201,30 +203,36 @@ async def setup_channel_perms(guild):
                 print(f"🔒 Locked channel {ch.name} to role {role.name}")
 
 def check_duplicates(current_uid, new_team_name, new_players):
-    """
-    Checks if team name or player names already exist in database (Registration).
-    """
     new_team_clean = new_team_name.strip().lower()
     new_players_clean = [p.strip().lower() for p in new_players if p.strip()]
 
-    # 1. Check for duplicates within the current submission
     if len(new_players_clean) != len(set(new_players_clean)):
         return True, "❌ You entered the same player name twice in this form."
 
     for uid, info in data["teams"].items():
         if uid == current_uid:
             continue
-
         existing_team = info.get("team", "").strip().lower()
         if existing_team == new_team_clean:
             return True, f"❌ Team Name **'{new_team_name}'** is already taken by another squad!"
-
         existing_players = [p.strip().lower() for p in info.get("players", [])]
         for np in new_players_clean:
             if np in existing_players:
                 return True, f"❌ Player Name **'{np}'** is already registered in another team!"
 
     return False, ""
+
+def check_spam(uid):
+    """Returns True if user is spamming (clicked too fast)."""
+    now = time.time()
+    if now - click_cooldown[uid] < COOLDOWN_SECONDS:
+        return True
+    click_cooldown[uid] = now
+    # Clean old entries to save memory
+    to_delete = [k for k, v in click_cooldown.items() if now - v > 60]
+    for k in to_delete:
+        del click_cooldown[k]
+    return False
 
 # ═══════════════════ 4. LIVE TABLE REFRESH ═══════════════════
 async def refresh_table(guild, slot_name):
@@ -240,7 +248,6 @@ async def refresh_table(guild, slot_name):
     color = Theme.match_color(count, MAX_SLOTS)
     bar = Theme.bar(count, MAX_SLOTS, 16)
 
-    # Build table
     table_lines = []
     for i in range(MAX_SLOTS):
         num = f"{i+1:02d}"
@@ -272,8 +279,8 @@ async def refresh_table(guild, slot_name):
             message = await channel.fetch_message(msg_id)
             await message.edit(embed=embed)
         except discord.NotFound:
-            message = None 
-    
+            message = None
+
     if message is None:
         message = await channel.send(embed=embed)
         data["table_messages"][slot_name] = message.id
@@ -283,11 +290,11 @@ async def refresh_table(guild, slot_name):
 async def add_player_to_slot(interaction, slot_name):
     uid = str(interaction.user.id)
     guild = interaction.guild
-    
+
     if not REGISTRATION_OPEN:
         await interaction.response.send_message("⛔ **Match is starting! Registration is closed.**", ephemeral=True)
         return False
-        
+
     if len(data["slots"][slot_name]) >= MAX_SLOTS:
         return False
 
@@ -298,7 +305,7 @@ async def add_player_to_slot(interaction, slot_name):
     data["slots"][slot_name].append(uid)
     if "booked_slots" not in data["teams"][uid]:
         data["teams"][uid]["booked_slots"] = []
-    
+
     if slot_name not in data["teams"][uid]["booked_slots"]:
         data["teams"][uid]["booked_slots"].append(slot_name)
     save_data(data)
@@ -316,10 +323,10 @@ async def add_player_to_slot(interaction, slot_name):
 async def perform_removal(guild, uid, slot_name):
     if uid in data["slots"][slot_name]:
         data["slots"][slot_name].remove(uid)
-    
-    if uid in data["teams"] and slot_name in data["teams"][uid]["booked_slots"]:
+
+    if uid in data["teams"] and slot_name in data["teams"][uid].get("booked_slots", []):
         data["teams"][uid]["booked_slots"].remove(slot_name)
-    
+
     save_data(data)
 
     role_name = SLOT_ROLES.get(slot_name)
@@ -336,10 +343,8 @@ async def remove_single_slot_logic(interaction, slot_to_remove):
     uid = str(interaction.user.id)
     if uid not in data["teams"]: return False, "No team data."
     booked = data["teams"][uid].get("booked_slots", [])
-    
     if slot_to_remove not in booked:
         return False, "You don't own this slot."
-
     await perform_removal(interaction.guild, uid, slot_to_remove)
     return True, f"✅ Removed from **{slot_to_remove}**."
 
@@ -347,7 +352,6 @@ async def remove_all_slots_logic(interaction):
     uid = str(interaction.user.id)
     if uid not in data["teams"] or not data["teams"][uid].get("booked_slots"):
         return False, "You have no slots to cancel."
-
     booked = list(data["teams"][uid]["booked_slots"])
     for s in booked:
         await perform_removal(interaction.guild, uid, s)
@@ -358,7 +362,7 @@ async def remove_all_slots_logic(interaction):
 async def daily_reset_task():
     utc_now = datetime.datetime.utcnow()
     local_now = utc_now + datetime.timedelta(hours=TIMEZONE_OFFSET)
-    
+
     if local_now.hour == 0 and local_now.minute == 0:
         print("🕛 MIDNIGHT RESET: Cleaning up...")
         if not bot.guilds: return
@@ -373,24 +377,25 @@ async def daily_reset_task():
                     if member:
                         try: await member.remove_roles(role)
                         except Exception: pass
-            data["slots"][slot_name] = [] 
+            data["slots"][slot_name] = []
 
-        # Reset paid flag and booked slots for all teams
         for uid in data["teams"]:
             data["teams"][uid]["booked_slots"] = []
             data["teams"][uid]["paid"] = False
 
         uids_to_delete = []
         for uid, info in data["teams"].items():
-            reg_time_str = info.get("last_updated", utc_now.isoformat()) 
+            reg_time_str = info.get("last_updated", utc_now.isoformat())
             reg_time = datetime.datetime.fromisoformat(reg_time_str)
             if (utc_now - reg_time).days >= DATA_EXPIRY_DAYS:
                 uids_to_delete.append(uid)
-        
+
         for uid in uids_to_delete:
             del data["teams"][uid]
             print(f"🗑️ Deleted expired data for User ID: {uid}")
 
+        # Clear open tickets tracking
+        data["open_tickets"] = {}
         save_data(data)
 
         for slot_name in SLOT_LIST_CHANNELS:
@@ -398,12 +403,209 @@ async def daily_reset_task():
             await asyncio.sleep(1)
 
         log_ch = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-        if log_ch: await log_ch.send("🕛 **Daily Reset & Cleanup Complete.**")
-        
+        if log_ch:
+            await log_ch.send("🕛 **Daily Reset & Cleanup Complete.**")
+
         global REGISTRATION_OPEN
         REGISTRATION_OPEN = True
 
-# ═══════════════════ 7. VERIFICATION SYSTEM ═══════════════════
+# ═══════════════════ 7. TICKET SYSTEM ═══════════════════
+class CloseTicketView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket_btn")
+    async def close_ticket(self, interaction: discord.Interaction, button: ui.Button):
+        # Only admin can close
+        if not interaction.user.guild_permissions.administrator:
+            e = make_embed("🔒 No Permission", "Only admins can close tickets.", Theme.ERROR)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
+        channel = interaction.channel
+        uid = None
+
+        # Find and remove from open_tickets
+        for user_id, ch_id in list(data["open_tickets"].items()):
+            if ch_id == channel.id:
+                uid = user_id
+                del data["open_tickets"][user_id]
+                save_data(data)
+                break
+
+        e = make_embed(
+            "🔒 Ticket Closing",
+            "This ticket will be deleted in **5 seconds**.",
+            Theme.ERROR
+        )
+        await interaction.response.send_message(embed=e)
+        await asyncio.sleep(5)
+
+        try:
+            await channel.delete()
+        except Exception:
+            pass
+
+        # Log to admin log
+        log_ch = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if log_ch:
+            log_e = make_embed(
+                "🎫 Ticket Closed",
+                f"**Channel:** #{channel.name}\n**Closed by:** {interaction.user.mention}",
+                Theme.ORANGE
+            )
+            await log_ch.send(embed=log_e)
+
+class OpenTicketView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="🎫 Open Payment Ticket", style=discord.ButtonStyle.blurple, custom_id="open_ticket_btn")
+    async def open_ticket(self, interaction: discord.Interaction, button: ui.Button):
+        uid = str(interaction.user.id)
+
+        # Anti spam check
+        if check_spam(uid):
+            e = make_embed("⏳ Slow Down!", "Please wait a moment before clicking again.", Theme.WARNING)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
+        # Check if already registered
+        if uid not in data["teams"]:
+            e = make_embed("❌ Not Registered", "Please register your team first before opening a ticket.", Theme.ERROR)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
+        # Check if already paid
+        if is_paid(uid):
+            e = make_embed("✅ Already Approved", "Your payment is already approved! You are in all matches.", Theme.SUCCESS)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
+        # Check if already has open ticket
+        if uid in data["open_tickets"]:
+            existing_ch = interaction.guild.get_channel(data["open_tickets"][uid])
+            if existing_ch:
+                e = make_embed(
+                    "🎫 Ticket Already Open",
+                    f"You already have an open ticket: {existing_ch.mention}\n\nPlease use your existing ticket.",
+                    Theme.WARNING
+                )
+                await interaction.response.send_message(embed=e, ephemeral=True)
+                return
+            else:
+                # Channel was deleted manually, remove from tracking
+                del data["open_tickets"][uid]
+                save_data(data)
+
+        # Get ticket category
+        category = interaction.guild.get_channel(TICKET_CATEGORY_ID)
+        if not category:
+            e = make_embed("❌ Error", "Ticket category not found. Contact an admin.", Theme.ERROR)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
+        # Create ticket channel name
+        team_name = data["teams"][uid].get("team", "team")
+        clean_name = "".join(c for c in team_name.lower() if c.isalnum() or c == "-")
+        ticket_channel_name = f"ticket-{clean_name}"
+
+        # Set permissions — only player and admins can see
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                attach_files=True
+            ),
+            interaction.guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                manage_channels=True
+            )
+        }
+
+        # Give admins access
+        for role in interaction.guild.roles:
+            if role.permissions.administrator:
+                overwrites[role] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True
+                )
+
+        try:
+            ticket_channel = await interaction.guild.create_text_channel(
+                name=ticket_channel_name,
+                category=category,
+                overwrites=overwrites
+            )
+        except Exception as e:
+            err = make_embed("❌ Error", f"Could not create ticket channel. Check bot permissions.\n`{e}`", Theme.ERROR)
+            await interaction.response.send_message(embed=err, ephemeral=True)
+            return
+
+        # Save open ticket
+        data["open_tickets"][uid] = ticket_channel.id
+        save_data(data)
+
+        # Send welcome message in ticket channel
+        upi = get_upi_settings()
+        welcome_e = make_embed(
+            "🎫 Payment Ticket",
+            f"{Theme.SEP}\n\n"
+            f"**Welcome {interaction.user.mention}!** 👋\n\n"
+            f"**Team:** {team_name}\n"
+            f"**Payment Amount:** ₹{upi['payment_amount']}\n"
+            f"**UPI ID:** `{upi['upi_id']}`\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            f"**📋 Please do the following:**\n"
+            f"> `1.` Send your **payment screenshot** here\n"
+            f"> `2.` An admin will verify your payment\n"
+            f"> `3.` Once approved you will be added to all 4 matches\n\n"
+            f"⏳ *Please be patient while an admin reviews your payment.*\n\n"
+            f"{Theme.SEP}",
+            Theme.GOLD,
+            "🎫 Payment Verification Ticket"
+        )
+        await ticket_channel.send(
+            content=f"{interaction.user.mention}",
+            embed=welcome_e,
+            view=CloseTicketView()
+        )
+
+        # Ping admins
+        admin_ping = make_embed(
+            "🔔 Admin Attention Required",
+            f"{interaction.user.mention} has opened a payment ticket for team **{team_name}**.\n"
+            f"Please verify their payment screenshot and use `!approve {interaction.user.mention}` to approve.",
+            Theme.ORANGE
+        )
+        await ticket_channel.send(embed=admin_ping)
+
+        # Log to admin log channel
+        log_ch = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if log_ch:
+            log_e = make_embed(
+                "🎫 New Ticket Opened",
+                f"**Player:** {interaction.user.mention}\n"
+                f"**Team:** {team_name}\n"
+                f"**Channel:** {ticket_channel.mention}",
+                Theme.ACCENT
+            )
+            await log_ch.send(embed=log_e)
+
+        # Confirm to player
+        e = make_embed(
+            "✅ Ticket Created!",
+            f"Your payment ticket has been created: {ticket_channel.mention}\n\n"
+            f"Please go there and send your payment screenshot.",
+            Theme.SUCCESS
+        )
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+# ═══════════════════ 8. VERIFICATION SYSTEM ═══════════════════
 class PlayerSelect(ui.UserSelect):
     def __init__(self, team_name):
         self.team_name = team_name
@@ -417,7 +619,6 @@ class PlayerSelect(ui.UserSelect):
             return
 
         members = self.values
-
         already_verified = [m.mention for m in members if role in m.roles]
         if already_verified:
             player_list = "\n".join([f"⚠️ {p}" for p in already_verified])
@@ -442,15 +643,9 @@ class PlayerSelect(ui.UserSelect):
                 return
 
         player_names_str = "\n".join(member_details)
-
         log_channel = interaction.guild.get_channel(VERIFIED_TEAM_LOG_ID)
         if log_channel:
-            log_embed = make_embed(
-                "🛡️ New Team Verified",
-                f"{Theme.SEP}",
-                Theme.GOLD,
-                f"Verified by {interaction.user.name}"
-            )
+            log_embed = make_embed("🛡️ New Team Verified", f"{Theme.SEP}", Theme.GOLD, f"Verified by {interaction.user.name}")
             log_embed.add_field(name="🏷️ Team Name", value=f"**{self.team_name}**", inline=False)
             log_embed.add_field(name="👥 Verified Players", value=player_names_str, inline=False)
             await log_channel.send(embed=log_embed)
@@ -472,35 +667,30 @@ class TeamNameModal(ui.Modal, title="🛡️ Team Verification"):
 
     async def on_submit(self, interaction: discord.Interaction):
         team_name = self.name_input.value
-        e = make_embed(
-            "👥 Select Squad Members",
-            f"Choose the **4 players** for **{team_name}** using the dropdown below.",
-            Theme.ACCENT
-        )
+        e = make_embed("👥 Select Squad Members", f"Choose the **4 players** for **{team_name}** using the dropdown below.", Theme.ACCENT)
         await interaction.response.send_message(embed=e, view=PlayerSelectView(team_name), ephemeral=True)
 
 class PersistentVerifyView(ui.View):
     def __init__(self):
-        super().__init__(timeout=None) 
+        super().__init__(timeout=None)
 
     @ui.button(label="「🛡️」Verify Your Squad", style=discord.ButtonStyle.green, custom_id="verify_btn_1")
     async def verify_button(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_modal(TeamNameModal())
 
-# ═══════════════════ 8. SLOT VIEWS ═══════════════════
+# ═══════════════════ 9. SLOT VIEWS ═══════════════════
 class TeamModal(discord.ui.Modal, title="📋 Squad Registration"):
     team = discord.ui.TextInput(label="Team Name", placeholder="Enter a unique team name...")
     p1 = discord.ui.TextInput(label="Player 1 — IGL (In-Game Leader)", placeholder="In-game name or Discord ID")
     p2 = discord.ui.TextInput(label="Player 2", placeholder="In-game name", required=False)
     p3 = discord.ui.TextInput(label="Player 3", placeholder="In-game name", required=False)
     p4 = discord.ui.TextInput(label="Player 4", placeholder="In-game name", required=False)
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         uid = str(interaction.user.id)
-        
         players_input = [self.p1.value, self.p2.value, self.p3.value, self.p4.value]
         is_duplicate, error_msg = check_duplicates(uid, self.team.value, players_input)
-        
+
         if is_duplicate:
             e = make_embed("⛔ Registration Error", error_msg, Theme.ERROR)
             await interaction.response.send_message(embed=e, ephemeral=True)
@@ -508,13 +698,13 @@ class TeamModal(discord.ui.Modal, title="📋 Squad Registration"):
 
         data["teams"][uid] = {
             "team": self.team.value,
-            "players": [p for p in players_input if p], 
+            "players": [p for p in players_input if p],
             "booked_slots": [],
             "paid": False,
             "last_updated": datetime.datetime.utcnow().isoformat()
         }
         save_data(data)
-        
+
         log_channel = interaction.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
         if log_channel:
             log_e = make_embed("🆕 Team Registered", f"{Theme.SEP}", Theme.ACCENT, f"User ID: {uid}")
@@ -525,13 +715,18 @@ class TeamModal(discord.ui.Modal, title="📋 Squad Registration"):
             log_e.add_field(name="💰 Payment", value="❌ Pending", inline=True)
             await log_channel.send(embed=log_e)
 
-        # Show payment instructions instead of slot buttons
-        await interaction.response.send_message(embed=make_payment_embed(self.team.value), ephemeral=True)
+        # Show payment embed + open ticket button
+        payment_view = OpenTicketView()
+        await interaction.response.send_message(
+            embed=make_payment_embed(self.team.value),
+            view=payment_view,
+            ephemeral=True
+        )
 
 class SlotButton(discord.ui.Button):
     def __init__(self, slot):
         count = len(data["slots"][slot])
-        display_name = slot.replace("_", " ") 
+        display_name = slot.replace("_", " ")
         status = "FULL" if count >= MAX_SLOTS else f"{count}/{MAX_SLOTS}"
         label = f"{display_name}  •  {status}"
         if count >= MAX_SLOTS:
@@ -547,22 +742,22 @@ class SlotButton(discord.ui.Button):
         uid = str(interaction.user.id)
         if not is_paid(uid):
             team_name = data.get("teams", {}).get(uid, {}).get("team", "your team")
-            await interaction.response.send_message(embed=make_payment_embed(team_name), ephemeral=True)
+            await interaction.response.send_message(
+                embed=make_payment_embed(team_name),
+                view=OpenTicketView(),
+                ephemeral=True
+            )
             return
         success = await add_player_to_slot(interaction, self.slot)
         if success:
             display = self.slot.replace('_', ' ')
             count = len(data["slots"][self.slot])
-            e = make_embed(
-                f"✅ Slot Claimed — {display}",
-                f"You are **#{count}** in the roster!\n{Theme.bar(count, MAX_SLOTS)}",
-                Theme.SUCCESS
-            )
+            e = make_embed(f"✅ Slot Claimed — {display}", f"You are **#{count}** in the roster!\n{Theme.bar(count, MAX_SLOTS)}", Theme.SUCCESS)
             await interaction.response.send_message(embed=e, ephemeral=True)
         else:
-             if not interaction.response.is_done():
-                 e = make_embed("❌ Claim Failed", "This match is full or you're already registered.", Theme.ERROR)
-                 await interaction.response.send_message(embed=e, ephemeral=True)
+            if not interaction.response.is_done():
+                e = make_embed("❌ Claim Failed", "This match is full or you're already registered.", Theme.ERROR)
+                await interaction.response.send_message(embed=e, ephemeral=True)
 
 class SlotSelectView(discord.ui.View):
     def __init__(self):
@@ -576,24 +771,39 @@ class AutoClaimView(discord.ui.View):
 
     @discord.ui.button(label="「⚡」Auto-Assign to Open Match", style=discord.ButtonStyle.blurple, custom_id="auto_claim_btn")
     async def auto_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not REGISTRATION_OPEN:
-            e = make_embed("⛔ Claims Closed", "Registration is currently locked. Please wait for the next round.", Theme.WARNING)
-            await interaction.response.send_message(embed=e, ephemeral=True)
-            return
         uid = str(interaction.user.id)
-        if uid not in data["teams"]:
-            e = make_embed("❌ Not Registered", "You must register your team first before claiming a slot.", Theme.ERROR)
+
+        # Anti spam
+        if check_spam(uid):
+            e = make_embed("⏳ Slow Down!", "Please wait a moment before clicking again.", Theme.WARNING)
             await interaction.response.send_message(embed=e, ephemeral=True)
             return
+
+        if not REGISTRATION_OPEN:
+            e = make_embed("⛔ Claims Closed", "Registration is currently locked.", Theme.WARNING)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
+        if uid not in data["teams"]:
+            e = make_embed("❌ Not Registered", "You must register your team first.", Theme.ERROR)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
         if not is_paid(uid):
             team_name = data["teams"][uid].get("team", "your team")
-            await interaction.response.send_message(embed=make_payment_embed(team_name), ephemeral=True)
+            await interaction.response.send_message(
+                embed=make_payment_embed(team_name),
+                view=OpenTicketView(),
+                ephemeral=True
+            )
             return
+
         assigned = None
         for slot_name in SLOT_LIST_CHANNELS:
             if len(data["slots"][slot_name]) < MAX_SLOTS and uid not in data["slots"][slot_name]:
                 assigned = slot_name
                 break
+
         if assigned:
             success = await add_player_to_slot(interaction, assigned)
             if success:
@@ -601,7 +811,7 @@ class AutoClaimView(discord.ui.View):
                 e = make_embed("⚡ Auto-Assigned!", f"You've been placed in **{display}**!", Theme.SUCCESS)
                 await interaction.response.send_message(embed=e, ephemeral=True)
         else:
-            e = make_embed("❌ All Full", "Every match slot is currently taken. Try again later or cancel an existing slot.", Theme.ERROR)
+            e = make_embed("❌ All Full", "Every match slot is currently taken.", Theme.ERROR)
             await interaction.response.send_message(embed=e, ephemeral=True)
 
 class TeamChoiceView(discord.ui.View):
@@ -613,13 +823,13 @@ class TeamChoiceView(discord.ui.View):
     async def continue_old(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
         if not is_paid(uid):
-            await interaction.response.send_message(embed=make_payment_embed(self.team_name), ephemeral=True)
+            await interaction.response.send_message(
+                embed=make_payment_embed(self.team_name),
+                view=OpenTicketView(),
+                ephemeral=True
+            )
             return
-        e = make_embed(
-            f"🏷️ Using Team — {self.team_name}",
-            f"Select a match below to claim your slot.",
-            Theme.SUCCESS
-        )
+        e = make_embed(f"🏷️ Using Team — {self.team_name}", "Select a match below to claim your slot.", Theme.SUCCESS)
         await interaction.response.send_message(embed=e, view=SlotSelectView(), ephemeral=True)
 
     @discord.ui.button(label="📝 Register New Team", style=discord.ButtonStyle.primary)
@@ -629,10 +839,17 @@ class TeamChoiceView(discord.ui.View):
 class MainRegisterView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    
+
     @discord.ui.button(label="「📝」Register Your Squad", style=discord.ButtonStyle.green, custom_id="reg_btn")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
+
+        # Anti spam
+        if check_spam(uid):
+            e = make_embed("⏳ Slow Down!", "Please wait a moment before clicking again.", Theme.WARNING)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
         if uid in data["teams"]:
             last_updated = data["teams"][uid].get("last_updated")
             if last_updated:
@@ -684,42 +901,62 @@ class CancelAndClaimView(discord.ui.View):
     @discord.ui.button(label="「🗑️」Leave a Match", style=discord.ButtonStyle.danger, custom_id="cancel_slot_btn")
     async def cancel_slot(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
+
+        # Anti spam
+        if check_spam(uid):
+            e = make_embed("⏳ Slow Down!", "Please wait a moment before clicking again.", Theme.WARNING)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
         if uid not in data["teams"] or not data["teams"][uid].get("booked_slots"):
-             e = make_embed("⚠️ No Active Matches", "You don't have any match slots to cancel.", Theme.WARNING)
-             await interaction.response.send_message(embed=e, ephemeral=True)
-             return
+            e = make_embed("⚠️ No Active Matches", "You don't have any match slots to cancel.", Theme.WARNING)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
         booked = data["teams"][uid]["booked_slots"]
         e = make_embed("🗑️ Leave a Match", "Select the match you want to leave from the dropdown below.", Theme.ORANGE)
         await interaction.response.send_message(embed=e, view=discord.ui.View().add_item(CancelDropdown(booked)), ephemeral=True)
 
     @discord.ui.button(label="「♻️」Join Open Match", style=discord.ButtonStyle.primary, custom_id="claim_open_btn")
     async def claim_open(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+
+        # Anti spam
+        if check_spam(uid):
+            e = make_embed("⏳ Slow Down!", "Please wait a moment before clicking again.", Theme.WARNING)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
         if not REGISTRATION_OPEN:
             e = make_embed("⛔ Claims Closed", "Registration is currently locked.", Theme.WARNING)
             await interaction.response.send_message(embed=e, ephemeral=True)
             return
-        uid = str(interaction.user.id)
         if uid not in data["teams"]:
             e = make_embed("❌ Not Registered", "Register your team first before joining a match.", Theme.ERROR)
             await interaction.response.send_message(embed=e, ephemeral=True)
             return
         if not is_paid(uid):
             team_name = data["teams"][uid].get("team", "your team")
-            await interaction.response.send_message(embed=make_payment_embed(team_name), ephemeral=True)
+            await interaction.response.send_message(
+                embed=make_payment_embed(team_name),
+                view=OpenTicketView(),
+                ephemeral=True
+            )
             return
         e = make_embed("🎮 Available Matches", "Select a match below to claim your slot.", Theme.ACCENT)
         await interaction.response.send_message(embed=e, view=SlotSelectView(), ephemeral=True)
 
-# ================= 9. BOT CLASS & ADMIN COMMANDS =================
+# ================= 10. BOT CLASS =================
 class SlotBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.all())
-    
+
     async def setup_hook(self):
         self.add_view(MainRegisterView())
         self.add_view(AutoClaimView())
         self.add_view(CancelAndClaimView())
         self.add_view(PersistentVerifyView())
+        self.add_view(OpenTicketView())
+        self.add_view(CloseTicketView())
 
 bot = SlotBot()
 
@@ -738,10 +975,10 @@ async def on_ready():
     if not daily_reset_task.is_running():
         daily_reset_task.start()
 
+# ================= 11. ADMIN COMMANDS =================
 @bot.command(aliases=["c", "purge"])
 @commands.has_permissions(administrator=True)
 async def clear(ctx, amount: int = 100):
-    """Clear messages from the current channel."""
     try:
         deleted = await ctx.channel.purge(limit=amount + 1)
         e = make_embed("🧹 Channel Cleared", f"Removed **{len(deleted)-1}** messages.", Theme.SUCCESS)
@@ -755,11 +992,9 @@ async def clear(ctx, amount: int = 100):
 @bot.command(aliases=["sv"])
 @commands.has_permissions(administrator=True)
 async def setup_verify(ctx):
-    """Setup the verification panel."""
     if ctx.channel.id != VERIFY_CHANNEL_ID:
         e = make_embed("⚠️ Channel Mismatch", f"Expected <#{VERIFY_CHANNEL_ID}>, posting here anyway.", Theme.WARNING)
         await ctx.send(embed=e, delete_after=5)
-    
     embed = make_embed(
         "🛡️ Squad Verification Portal",
         f"{Theme.SEP}\n\n"
@@ -782,14 +1017,13 @@ async def setup_verify(ctx):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def force_remove(ctx, match_name: str, slot_number: int):
-    """Force remove a team from a match slot."""
     match_key = match_name.upper()
     if match_key not in SLOT_LIST_CHANNELS:
         e = make_embed("❌ Invalid Match", "Use: `MATCH_1`, `MATCH_2`, `MATCH_3`, `MATCH_4`", Theme.ERROR)
         await ctx.send(embed=e)
         return
     registered_uids = data["slots"].get(match_key, [])
-    index = slot_number - 1 
+    index = slot_number - 1
     if index < 0 or index >= len(registered_uids):
         e = make_embed("❌ Empty Slot", f"Slot **#{slot_number}** has no team.", Theme.ERROR)
         await ctx.send(embed=e)
@@ -800,11 +1034,7 @@ async def force_remove(ctx, match_name: str, slot_number: int):
     display = match_key.replace('_', ' ')
     e = make_embed(
         "🔨 Team Removed",
-        f"{Theme.SEP}\n\n"
-        f"**Team:** {team_name}\n"
-        f"**Match:** {display}\n"
-        f"**Slot:** #{slot_number}\n"
-        f"**By:** {ctx.author.mention}",
+        f"{Theme.SEP}\n\n**Team:** {team_name}\n**Match:** {display}\n**Slot:** #{slot_number}\n**By:** {ctx.author.mention}",
         Theme.ORANGE
     )
     await ctx.send(embed=e)
@@ -813,12 +1043,11 @@ async def force_remove(ctx, match_name: str, slot_number: int):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def setup(ctx):
-    """Initialize all bot panels."""
     await ctx.message.delete()
     status_e = make_embed("⚙️ Setting Up...", "`▰▱▱▱▱` Configuring permissions...", Theme.PREMIUM)
     msg = await ctx.send(embed=status_e)
     await setup_channel_perms(ctx.guild)
-    
+
     reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
     if reg_ch:
         await msg.edit(embed=make_embed("⚙️ Setting Up...", "`▰▰▰▱▱` Creating registration panel...", Theme.PREMIUM))
@@ -827,34 +1056,29 @@ async def setup(ctx):
             "🏆 Tournament Registration",
             f"{Theme.SEP}\n\n"
             "**Welcome to the battlefield!** ⚔️\n\n"
-            "Register your squad and claim a match slot to compete.\n\n"
+            "Register your squad and pay the platform fee to compete.\n\n"
             f"{Theme.THIN_SEP}\n\n"
             "**📋 Steps:**\n"
             "> `1.` Click **Register** below\n"
             "> `2.` Fill in your team details\n"
-            "> `3.` Select your preferred match\n\n"
+            "> `3.` Pay platform fee via UPI\n"
+            "> `4.` Open a ticket & send screenshot\n"
+            "> `5.` Get approved and compete!\n\n"
             f"{Theme.SEP}",
             Theme.ACCENT,
             "📝 Registration"
         )
         await reg_ch.send(embed=reg_embed, view=MainRegisterView())
-        quick_e = make_embed(
-            "⚡ Quick Actions",
-            "Don't want to choose? Let the bot pick an open match for you!",
-            Theme.PREMIUM
-        )
+        quick_e = make_embed("⚡ Quick Actions", "Already approved? Let the bot auto-assign you to an open match!", Theme.PREMIUM)
         await reg_ch.send(embed=quick_e, view=AutoClaimView())
-    
+
     can_ch = ctx.guild.get_channel(CANCEL_CLAIM_CHANNEL_ID)
     if can_ch:
         await msg.edit(embed=make_embed("⚙️ Setting Up...", "`▰▰▰▰▱` Creating management panel...", Theme.PREMIUM))
         await can_ch.purge(limit=5)
         cancel_embed = make_embed(
             "🎮 Match Management",
-            f"{Theme.SEP}\n\n"
-            "Need to leave a match or join a different one?\n"
-            "Use the buttons below to manage your slots.\n\n"
-            f"{Theme.SEP}",
+            f"{Theme.SEP}\n\nNeed to leave a match or join a different one?\nUse the buttons below to manage your slots.\n\n{Theme.SEP}",
             Theme.ORANGE,
             "🔧 Slot Management"
         )
@@ -866,19 +1090,17 @@ async def setup(ctx):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def init_tables(ctx):
-    """Refresh all live match tables."""
     e = make_embed("🔄 Initializing...", "Refreshing all live tables...", Theme.PREMIUM)
     msg = await ctx.send(embed=e)
     for slot_name in SLOT_LIST_CHANNELS:
         await refresh_table(ctx.guild, slot_name)
-        await asyncio.sleep(1) 
+        await asyncio.sleep(1)
     await msg.edit(embed=make_embed("✅ Tables Live", "All match tables have been refreshed.", Theme.SUCCESS))
 
 @bot.command(aliases=["ns", "alert"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def notify_start(ctx, minutes: int, slot_name: str = None):
-    """Notify players about match start."""
     await ctx.message.delete()
     target_slot = slot_name.upper() if slot_name else None
     count = 0
@@ -895,11 +1117,7 @@ async def notify_start(ctx, minutes: int, slot_name: str = None):
             room_link = room_channel.mention if room_channel else "the room channel"
             notify_e = make_embed(
                 f"🚨 {display} — Starting Soon!",
-                f"{Theme.SEP}\n\n"
-                f"⏱️ **Match begins in `{minutes}` minutes!**\n\n"
-                f"📍 Check {room_link} for **Room ID & Password**\n\n"
-                f"{Theme.THIN_SEP}\n"
-                "*Be ready and in the lobby on time!*",
+                f"{Theme.SEP}\n\n⏱️ **Match begins in `{minutes}` minutes!**\n\n📍 Check {room_link} for **Room ID & Password**\n\n{Theme.THIN_SEP}\n*Be ready and in the lobby on time!*",
                 Theme.ERROR,
                 "⚔️ Good luck, warriors!"
             )
@@ -912,14 +1130,9 @@ async def notify_start(ctx, minutes: int, slot_name: str = None):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def lock(ctx):
-    """Lock registration system."""
     global REGISTRATION_OPEN
     REGISTRATION_OPEN = False
-    e = make_embed(
-        "🔒 System Locked",
-        f"{Theme.SEP}\n\nRegistration and slot claims are now **disabled**.\nUse `!unlock` to re-open.",
-        Theme.ERROR
-    )
+    e = make_embed("🔒 System Locked", f"{Theme.SEP}\n\nRegistration is now **disabled**.\nUse `!unlock` to re-open.", Theme.ERROR)
     await ctx.send(embed=e)
     reg_ch = ctx.guild.get_channel(REGISTRATION_CHANNEL_ID)
     if reg_ch:
@@ -930,18 +1143,92 @@ async def lock(ctx):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def unlock(ctx):
-    """Unlock registration system."""
     global REGISTRATION_OPEN
     REGISTRATION_OPEN = True
+    e = make_embed("🔓 System Unlocked", f"{Theme.SEP}\n\nRegistration is now **open**!", Theme.SUCCESS)
+    await ctx.send(embed=e)
+
+# ═══════════════════ TICKET ADMIN COMMANDS ═══════════════════
+@bot.command(aliases=["ct"])
+@commands.has_permissions(administrator=True)
+async def close(ctx):
+    """Close and delete the current ticket channel."""
+    uid = None
+    for user_id, ch_id in list(data["open_tickets"].items()):
+        if ch_id == ctx.channel.id:
+            uid = user_id
+            del data["open_tickets"][user_id]
+            save_data(data)
+            break
+
+    if uid is None:
+        e = make_embed("❌ Not a Ticket", "This command can only be used in a ticket channel.", Theme.ERROR)
+        await ctx.send(embed=e)
+        return
+
+    e = make_embed("🔒 Ticket Closing", "This ticket will be deleted in **5 seconds**.", Theme.ERROR)
+    await ctx.send(embed=e)
+    await asyncio.sleep(5)
+
+    channel_name = ctx.channel.name
+    try:
+        await ctx.channel.delete()
+    except Exception:
+        pass
+
+    log_ch = ctx.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+    if log_ch:
+        log_e = make_embed("🎫 Ticket Closed", f"**Channel:** #{channel_name}\n**Closed by:** {ctx.author.mention}", Theme.ORANGE)
+        await log_ch.send(embed=log_e)
+
+@bot.command(aliases=["att"])
+@commands.has_permissions(administrator=True)
+async def add_to_ticket(ctx, member: discord.Member):
+    """Add a user to the current ticket channel."""
+    uid = None
+    for user_id, ch_id in data["open_tickets"].items():
+        if ch_id == ctx.channel.id:
+            uid = user_id
+            break
+
+    if uid is None:
+        e = make_embed("❌ Not a Ticket", "This command can only be used in a ticket channel.", Theme.ERROR)
+        await ctx.send(embed=e)
+        return
+
+    try:
+        await ctx.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+        e = make_embed("✅ User Added", f"{member.mention} has been added to this ticket.", Theme.SUCCESS)
+        await ctx.send(embed=e)
+    except Exception:
+        e = make_embed("❌ Error", "Could not add user to ticket.", Theme.ERROR)
+        await ctx.send(embed=e)
+
+@bot.command(aliases=["lt"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def list_tickets(ctx):
+    """List all currently open tickets."""
+    if not data["open_tickets"]:
+        e = make_embed("🎫 No Open Tickets", "There are no open tickets right now.", Theme.SUCCESS)
+        await ctx.send(embed=e)
+        return
+
+    lines = []
+    for uid, ch_id in data["open_tickets"].items():
+        ch = ctx.guild.get_channel(ch_id)
+        team = data["teams"].get(uid, {}).get("team", "Unknown")
+        ch_mention = ch.mention if ch else f"#deleted ({ch_id})"
+        lines.append(f"• <@{uid}> — **{team}** — {ch_mention}")
+
     e = make_embed(
-        "🔓 System Unlocked",
-        f"{Theme.SEP}\n\nRegistration is now **open**! Players can claim slots again.",
-        Theme.SUCCESS
+        f"🎫 Open Tickets ({len(lines)})",
+        f"{Theme.SEP}\n\n" + "\n".join(lines),
+        Theme.GOLD
     )
     await ctx.send(embed=e)
 
-# ═══════════════════ 9B. PAYMENT ADMIN COMMANDS ═══════════════════
-
+# ═══════════════════ PAYMENT ADMIN COMMANDS ═══════════════════
 @bot.command(aliases=["ap"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
@@ -951,22 +1238,19 @@ async def approve(ctx, member: discord.Member):
     if uid not in data["teams"]:
         await ctx.send(embed=make_embed("❌ Not Found", f"{member.mention} has no registered team.", Theme.ERROR))
         return
-    
+
     if data["teams"][uid].get("paid", False):
         await ctx.send(embed=make_embed("⚠️ Already Approved", f"{member.mention}'s payment is already approved.", Theme.WARNING))
         return
-    
-    # Set paid
+
     data["teams"][uid]["paid"] = True
     data["teams"][uid]["last_updated"] = datetime.datetime.utcnow().isoformat()
-    
-    # Auto-add to all 4 matches
+
     added = []
     skipped = []
-    already_in = []
     for slot_name in SLOT_LIST_CHANNELS:
         if uid in data["slots"][slot_name]:
-            already_in.append(slot_name)
+            pass
         elif len(data["slots"][slot_name]) >= MAX_SLOTS:
             skipped.append(slot_name)
         else:
@@ -976,10 +1260,9 @@ async def approve(ctx, member: discord.Member):
             if slot_name not in data["teams"][uid]["booked_slots"]:
                 data["teams"][uid]["booked_slots"].append(slot_name)
             added.append(slot_name)
-    
+
     save_data(data)
-    
-    # Assign roles for added matches
+
     for slot_name in added:
         role_name = SLOT_ROLES.get(slot_name)
         if role_name:
@@ -987,46 +1270,35 @@ async def approve(ctx, member: discord.Member):
             if role:
                 try: await member.add_roles(role)
                 except Exception: pass
-    
-    # Refresh all tables
+
     for slot_name in SLOT_LIST_CHANNELS:
         await refresh_table(ctx.guild, slot_name)
         await asyncio.sleep(0.5)
-    
-    # Build status strings
+
     team_name = data["teams"][uid]["team"]
     added_str = ", ".join([s.replace("_", " ") for s in added]) or "None"
     skipped_str = ", ".join([s.replace("_", " ") for s in skipped]) or "None"
-    
-    # Admin confirmation
+
     admin_embed = make_embed(
         "✅ Payment Approved",
-        f"{Theme.SEP}\n\n"
-        f"**Team:** {team_name}\n"
-        f"**Leader:** {member.mention}\n\n"
-        f"**✅ Added to:** {added_str}\n"
-        f"**🔴 Skipped (Full):** {skipped_str}\n\n"
-        f"**Approved by:** {ctx.author.mention}",
+        f"{Theme.SEP}\n\n**Team:** {team_name}\n**Leader:** {member.mention}\n\n"
+        f"**✅ Added to:** {added_str}\n**🔴 Skipped (Full):** {skipped_str}\n\n**Approved by:** {ctx.author.mention}",
         Theme.SUCCESS
     )
     await ctx.send(embed=admin_embed)
-    
-    # Log to admin log channel
+
     log_ch = ctx.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
     if log_ch:
         await log_ch.send(embed=admin_embed)
-    
-    # DM to player
+
     try:
         dm_desc = (
-            f"{Theme.SEP}\n\n"
-            f"Your payment for team **{team_name}** has been verified! ✅\n\n"
+            f"{Theme.SEP}\n\nYour payment for team **{team_name}** has been verified! ✅\n\n"
             f"**Matches Joined:** {added_str}\n"
         )
         if skipped:
             dm_desc += f"⚠️ **Full Matches (skipped):** {skipped_str}\n"
-        dm_desc += f"\n{Theme.THIN_SEP}\n*Check the match channels for room details before the match starts.*"
-        
+        dm_desc += f"\n{Theme.THIN_SEP}\n*Check match channels for room details before match starts.*"
         dm_embed = make_embed("✅ Payment Approved!", dm_desc, Theme.SUCCESS, "💰 Payment Verified")
         await member.send(embed=dm_embed)
     except Exception:
@@ -1036,51 +1308,40 @@ async def approve(ctx, member: discord.Member):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def unapprove(ctx, member: discord.Member):
-    """Reverse a payment approval — removes from all matches, removes roles."""
+    """Reverse a payment approval."""
     uid = str(member.id)
     if uid not in data["teams"]:
         await ctx.send(embed=make_embed("❌ Not Found", f"{member.mention} has no registered team.", Theme.ERROR))
         return
-    
+
     if not data["teams"][uid].get("paid", False):
         await ctx.send(embed=make_embed("⚠️ Not Approved", f"{member.mention}'s payment was not approved.", Theme.WARNING))
         return
-    
-    # Set unpaid
+
     data["teams"][uid]["paid"] = False
     team_name = data["teams"][uid]["team"]
-    
-    # Remove from all matches
     booked = list(data["teams"][uid].get("booked_slots", []))
     for slot_name in booked:
         await perform_removal(ctx.guild, uid, slot_name)
-    
+
     save_data(data)
-    
     removed_str = ", ".join([s.replace("_", " ") for s in booked]) or "None"
-    
+
     e = make_embed(
         "🔄 Payment Unapproved",
-        f"{Theme.SEP}\n\n"
-        f"**Team:** {team_name}\n"
-        f"**Leader:** {member.mention}\n"
-        f"**Removed from:** {removed_str}\n\n"
-        f"**By:** {ctx.author.mention}",
+        f"{Theme.SEP}\n\n**Team:** {team_name}\n**Leader:** {member.mention}\n**Removed from:** {removed_str}\n\n**By:** {ctx.author.mention}",
         Theme.ORANGE
     )
     await ctx.send(embed=e)
-    
+
     log_ch = ctx.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
     if log_ch:
         await log_ch.send(embed=e)
-    
-    # DM to player
+
     try:
         dm_e = make_embed(
             "⚠️ Payment Reversed",
-            f"Your payment approval for team **{team_name}** has been reversed.\n"
-            f"You have been removed from all matches.\n\n"
-            f"*Contact admin if this is a mistake.*",
+            f"Your payment approval for team **{team_name}** has been reversed.\nYou have been removed from all matches.\n\n*Contact admin if this is a mistake.*",
             Theme.ORANGE
         )
         await member.send(embed=dm_e)
@@ -1091,50 +1352,31 @@ async def unapprove(ctx, member: discord.Member):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def pending(ctx):
-    """Show all teams with pending (unpaid) payments."""
+    """Show all teams with pending payments."""
     pending_teams = []
     for uid, info in data["teams"].items():
         if not info.get("paid", False):
             team_name = info.get("team", "Unknown")
             reg_time = info.get("last_updated", "Unknown")[:16]
             pending_teams.append(f"• **{team_name}** — <@{uid}> (Registered: `{reg_time}`)")
-    
+
     if not pending_teams:
         await ctx.send(embed=make_embed("✅ No Pending Payments", "All registered teams have been approved!", Theme.SUCCESS))
         return
-    
+
     desc = f"{Theme.SEP}\n\n" + "\n".join(pending_teams) + f"\n\n{Theme.THIN_SEP}\n**Total:** `{len(pending_teams)}` pending\n\nUse `!approve @user` to approve."
-    
-    # Handle long messages
-    if len(desc) > 4000:
-        chunks = [pending_teams[i:i+15] for i in range(0, len(pending_teams), 15)]
-        for i, chunk in enumerate(chunks):
-            chunk_desc = f"{Theme.SEP}\n\n" + "\n".join(chunk)
-            title = f"💰 Pending Payments ({i+1}/{len(chunks)})"
-            await ctx.send(embed=make_embed(title, chunk_desc, Theme.GOLD))
-    else:
-        await ctx.send(embed=make_embed("💰 Pending Payments", desc, Theme.GOLD))
+    await ctx.send(embed=make_embed("💰 Pending Payments", desc, Theme.GOLD))
 
 @bot.command(aliases=["supi"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def setupi(ctx, upi_id: str, amount: int, *, name: str):
-    """Set UPI payment details. Usage: !setupi <upi_id> <amount> <name>"""
-    data["upi_settings"] = {
-        "upi_id": upi_id,
-        "upi_name": name,
-        "payment_amount": amount
-    }
+    """Set UPI payment details."""
+    data["upi_settings"] = {"upi_id": upi_id, "upi_name": name, "payment_amount": amount}
     save_data(data)
-    
     e = make_embed(
         "✅ UPI Settings Updated",
-        f"{Theme.SEP}\n\n"
-        f"**UPI ID:** `{upi_id}`\n"
-        f"**Name:** `{name}`\n"
-        f"**Amount:** `₹{amount}`\n\n"
-        f"{Theme.THIN_SEP}\n"
-        f"*These details will be shown to players during registration.*",
+        f"{Theme.SEP}\n\n**UPI ID:** `{upi_id}`\n**Name:** `{name}`\n**Amount:** `₹{amount}`",
         Theme.SUCCESS
     )
     await ctx.send(embed=e)
@@ -1147,28 +1389,17 @@ async def viewupi(ctx):
     upi = get_upi_settings()
     e = make_embed(
         "💳 Current UPI Settings",
-        f"{Theme.SEP}\n\n"
-        f"**UPI ID:** `{upi['upi_id']}`\n"
-        f"**Name:** `{upi['upi_name']}`\n"
-        f"**Amount:** `₹{upi['payment_amount']}`\n\n"
-        f"{Theme.THIN_SEP}\n"
-        f"*Use `!setupi <upi_id> <amount> <name>` to change.*",
+        f"{Theme.SEP}\n\n**UPI ID:** `{upi['upi_id']}`\n**Name:** `{upi['upi_name']}`\n**Amount:** `₹{upi['payment_amount']}`",
         Theme.GOLD
     )
     await ctx.send(embed=e)
 
-# ═══════════════════ 10. ANNOUNCEMENT SYSTEM ═══════════════════
+# ═══════════════════ ANNOUNCEMENT SYSTEM ═══════════════════
 @bot.command(aliases=["ann"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def announce(ctx, channel: discord.TextChannel, *, message: str):
-    """Send a rich announcement to any channel."""
-    embed = make_embed(
-        "📣 Announcement",
-        f"{Theme.SEP}\n\n{message}\n\n{Theme.SEP}",
-        Theme.GOLD,
-        f"Posted by {ctx.author.display_name}"
-    )
+    embed = make_embed("📣 Announcement", f"{Theme.SEP}\n\n{message}\n\n{Theme.SEP}", Theme.GOLD, f"Posted by {ctx.author.display_name}")
     await channel.send(embed=embed)
     e = make_embed("✅ Sent", f"Announcement delivered to {channel.mention}", Theme.SUCCESS)
     await ctx.send(embed=e, delete_after=5)
@@ -1178,7 +1409,6 @@ async def announce(ctx, channel: discord.TextChannel, *, message: str):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def announce_match(ctx, match_name: str, *, message: str):
-    """Announce to a specific match channel with role ping."""
     match_key = match_name.upper()
     if match_key not in SLOT_LIST_CHANNELS:
         e = make_embed("❌ Invalid Match", "Use: `MATCH_1`, `MATCH_2`, `MATCH_3`, `MATCH_4`", Theme.ERROR)
@@ -1190,12 +1420,7 @@ async def announce_match(ctx, match_name: str, *, message: str):
         await ctx.send(embed=make_embed("❌ Error", "Match channel not found.", Theme.ERROR))
         return
     display = match_key.replace("_", " ")
-    embed = make_embed(
-        f"📢 {display} — Announcement",
-        f"{Theme.SEP}\n\n{message}\n\n{Theme.SEP}",
-        Theme.ORANGE,
-        f"By {ctx.author.display_name}"
-    )
+    embed = make_embed(f"📢 {display} — Announcement", f"{Theme.SEP}\n\n{message}\n\n{Theme.SEP}", Theme.ORANGE, f"By {ctx.author.display_name}")
     ping = role.mention if role else ""
     await channel.send(content=ping, embed=embed)
     await ctx.send(embed=make_embed("✅ Sent", f"Delivered to {channel.mention}", Theme.SUCCESS), delete_after=5)
@@ -1205,19 +1430,13 @@ async def announce_match(ctx, match_name: str, *, message: str):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def announce_all(ctx, *, message: str):
-    """Broadcast an announcement to ALL match channels with role pings."""
     count = 0
     for slot_name, channel_id in SLOT_LIST_CHANNELS.items():
         channel = ctx.guild.get_channel(channel_id)
         role = discord.utils.get(ctx.guild.roles, name=SLOT_ROLES.get(slot_name))
         if not channel: continue
         display = slot_name.replace("_", " ")
-        embed = make_embed(
-            f"📣 {display} — Announcement",
-            f"{Theme.SEP}\n\n{message}\n\n{Theme.SEP}",
-            Theme.GOLD,
-            f"By {ctx.author.display_name}"
-        )
+        embed = make_embed(f"📣 {display} — Announcement", f"{Theme.SEP}\n\n{message}\n\n{Theme.SEP}", Theme.GOLD, f"By {ctx.author.display_name}")
         ping = role.mention if role else ""
         await channel.send(content=ping, embed=embed)
         count += 1
@@ -1229,7 +1448,6 @@ async def announce_all(ctx, *, message: str):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def schedule(ctx, match_name: str, time: str, map_name: str = "TBD", mode: str = "TBD"):
-    """Post a match schedule card."""
     match_key = match_name.upper()
     if match_key not in SLOT_LIST_CHANNELS:
         await ctx.send(embed=make_embed("❌ Invalid Match", "Use: `MATCH_1` to `MATCH_4`", Theme.ERROR))
@@ -1239,12 +1457,7 @@ async def schedule(ctx, match_name: str, time: str, map_name: str = "TBD", mode:
     if not channel: return
     display = match_key.replace("_", " ")
     count = len(data["slots"].get(match_key, []))
-    embed = make_embed(
-        f"📅 {display} — Match Schedule",
-        f"{Theme.SEP}",
-        Theme.PREMIUM,
-        "⏰ Be ready 10 mins before match time!"
-    )
+    embed = make_embed(f"📅 {display} — Match Schedule", f"{Theme.SEP}", Theme.PREMIUM, "⏰ Be ready 10 mins before match time!")
     embed.add_field(name="⏰ Time", value=f"```{time}```", inline=True)
     embed.add_field(name="🗺️ Map", value=f"```{map_name}```", inline=True)
     embed.add_field(name="🎮 Mode", value=f"```{mode}```", inline=True)
@@ -1258,7 +1471,6 @@ async def schedule(ctx, match_name: str, time: str, map_name: str = "TBD", mode:
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def room(ctx, match_name: str, room_id: str, password: str):
-    """Post Room ID & Password."""
     match_key = match_name.upper()
     if match_key not in ROOM_CHANNELS:
         await ctx.send(embed=make_embed("❌ Invalid Match", "Use: `MATCH_1` to `MATCH_4`", Theme.ERROR))
@@ -1267,13 +1479,7 @@ async def room(ctx, match_name: str, room_id: str, password: str):
     role = discord.utils.get(ctx.guild.roles, name=SLOT_ROLES.get(match_key))
     if not channel: return
     display = match_key.replace("_", " ")
-    embed = make_embed(
-        f"🔐 {display} — Room Credentials",
-        f"{Theme.SEP}\n\n"
-        f"⚠️ **CONFIDENTIAL** — Do NOT share outside this channel!",
-        Theme.SUCCESS,
-        f"Posted by {ctx.author.display_name}"
-    )
+    embed = make_embed(f"🔐 {display} — Room Credentials", f"{Theme.SEP}\n\n⚠️ **CONFIDENTIAL** — Do NOT share outside this channel!", Theme.SUCCESS, f"Posted by {ctx.author.display_name}")
     embed.add_field(name="🆔 Room ID", value=f"```fix\n{room_id}\n```", inline=True)
     embed.add_field(name="🔒 Password", value=f"```fix\n{password}\n```", inline=True)
     ping = role.mention if role else ""
@@ -1281,23 +1487,19 @@ async def room(ctx, match_name: str, room_id: str, password: str):
     await ctx.send(embed=make_embed("✅ Room Details Sent", f"Delivered to {channel.mention}", Theme.SUCCESS), delete_after=5)
     await ctx.message.delete()
 
-# ═══════════════════ 11. SMART COMMANDS ═══════════════════
 @bot.command(name="status", aliases=["st"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def bot_status(ctx):
-    """Show a live dashboard of all matches."""
     reg_status = "🟢 OPEN" if REGISTRATION_OPEN else "🔴 CLOSED"
     total_teams = len(data["teams"])
     total_booked = sum(len(v) for v in data["slots"].values())
     total_cap = MAX_SLOTS * len(SLOT_LIST_CHANNELS)
+    open_tickets = len(data.get("open_tickets", {}))
     embed = make_embed(
         "📊 Tournament Dashboard",
-        f"{Theme.SEP}\n\n"
-        f"**Registration:** {reg_status}\n"
-        f"**Registered Teams:** `{total_teams}`\n"
-        f"**Overall Fill:** {Theme.bar(total_booked, total_cap)}\n\n"
-        f"{Theme.THIN_SEP}",
+        f"{Theme.SEP}\n\n**Registration:** {reg_status}\n**Registered Teams:** `{total_teams}`\n"
+        f"**Open Tickets:** `{open_tickets}`\n**Overall Fill:** {Theme.bar(total_booked, total_cap)}\n\n{Theme.THIN_SEP}",
         Theme.PREMIUM
     )
     for slot_name in SLOT_LIST_CHANNELS:
@@ -1305,19 +1507,14 @@ async def bot_status(ctx):
         status = Theme.match_status(count, MAX_SLOTS)
         bar = Theme.bar(count, MAX_SLOTS)
         display = slot_name.replace("_", " ")
-        embed.add_field(
-            name=f"{display}",
-            value=f"{status}\n{bar}",
-            inline=True
-        )
+        embed.add_field(name=f"{display}", value=f"{status}\n{bar}", inline=True)
     await ctx.send(embed=embed)
 
 @bot.command(name="myteam", aliases=["mt"])
 async def my_team(ctx):
-    """View your own team info and booked matches."""
     uid = str(ctx.author.id)
     if uid not in data["teams"]:
-        e = make_embed("❌ No Team Found", "You haven't registered a team yet.\nHead to the registration channel to get started!", Theme.ERROR)
+        e = make_embed("❌ No Team Found", "You haven't registered a team yet.", Theme.ERROR)
         await ctx.send(embed=e, delete_after=10)
         return
     info = data["teams"][uid]
@@ -1328,11 +1525,7 @@ async def my_team(ctx):
     match_list = "\n".join([f"• {s.replace('_', ' ')}" for s in booked]) if booked else "*No matches booked*"
     embed = make_embed(
         f"🏷️ {info['team']}",
-        f"{Theme.SEP}\n\n"
-        f"**👥 Squad Roster:**\n{roster}\n\n"
-        f"**💰 Payment:** {paid_status}\n\n"
-        f"{Theme.THIN_SEP}\n\n"
-        f"**🎮 Active Matches:**\n{match_list}",
+        f"{Theme.SEP}\n\n**👥 Squad Roster:**\n{roster}\n\n**💰 Payment:** {paid_status}\n\n{Theme.THIN_SEP}\n\n**🎮 Active Matches:**\n{match_list}",
         Theme.TEAL
     )
     last = info.get("last_updated", "Unknown")
@@ -1344,7 +1537,6 @@ async def my_team(ctx):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def teaminfo(ctx, *, team_name: str):
-    """Admin lookup of a team by name."""
     search = team_name.strip().lower()
     for uid, info in data["teams"].items():
         if info.get("team", "").strip().lower() == search:
@@ -1355,13 +1547,7 @@ async def teaminfo(ctx, *, team_name: str):
             matches = "\n".join([f"• {s.replace('_', ' ')}" for s in booked]) if booked else "None"
             embed = make_embed(
                 f"🔍 Team — {info['team']}",
-                f"{Theme.SEP}\n\n"
-                f"**👤 Leader:** <@{uid}>\n"
-                f"**🆔 User ID:** `{uid}`\n"
-                f"**💰 Payment:** {paid_status}\n\n"
-                f"**👥 Players:**\n{roster}\n\n"
-                f"{Theme.THIN_SEP}\n\n"
-                f"**🎮 Matches:**\n{matches}",
+                f"{Theme.SEP}\n\n**👤 Leader:** <@{uid}>\n**🆔 User ID:** `{uid}`\n**💰 Payment:** {paid_status}\n\n**👥 Players:**\n{roster}\n\n{Theme.THIN_SEP}\n\n**🎮 Matches:**\n{matches}",
                 Theme.TEAL
             )
             await ctx.send(embed=embed)
@@ -1372,35 +1558,24 @@ async def teaminfo(ctx, *, team_name: str):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def whois(ctx, member: discord.Member):
-    """Look up which team a player belongs to."""
     uid = str(member.id)
     if uid in data["teams"]:
         info = data["teams"][uid]
-        e = make_embed(
-            "🔍 Player Found",
-            f"**{member.display_name}** is the **leader** of team **{info['team']}**.",
-            Theme.SUCCESS
-        )
+        e = make_embed("🔍 Player Found", f"**{member.display_name}** is the **leader** of team **{info['team']}**.", Theme.SUCCESS)
         await ctx.send(embed=e)
         return
     for owner_uid, info in data["teams"].items():
         players = [p.strip().lower() for p in info.get("players", [])]
         if member.display_name.strip().lower() in players or member.name.strip().lower() in players:
-            e = make_embed(
-                "🔍 Player Found",
-                f"**{member.display_name}** is a member of team **{info['team']}**\n└ Leader: <@{owner_uid}>",
-                Theme.SUCCESS
-            )
+            e = make_embed("🔍 Player Found", f"**{member.display_name}** is a member of team **{info['team']}**\n└ Leader: <@{owner_uid}>", Theme.SUCCESS)
             await ctx.send(embed=e)
             return
     await ctx.send(embed=make_embed("❌ Not Found", f"**{member.display_name}** is not registered in any team.", Theme.ERROR))
 
-# ═══════════════════ 12. DATA MANAGEMENT ═══════════════════
 @bot.command(aliases=["ut", "rename"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def update_team(ctx, member: discord.Member, *, new_name: str):
-    """Change a team's name."""
     uid = str(member.id)
     if uid not in data["teams"]:
         await ctx.send(embed=make_embed("❌ Error", f"{member.mention} has no registered team.", Theme.ERROR))
@@ -1425,7 +1600,6 @@ async def update_team(ctx, member: discord.Member, *, new_name: str):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def swap_slot(ctx, match_name: str, slot1: int, slot2: int):
-    """Swap two teams in a match."""
     match_key = match_name.upper()
     if match_key not in SLOT_LIST_CHANNELS:
         await ctx.send(embed=make_embed("❌ Invalid Match", "Use valid match names.", Theme.ERROR))
@@ -1441,18 +1615,13 @@ async def swap_slot(ctx, match_name: str, slot1: int, slot2: int):
     t1 = data["teams"].get(slots[i1], {}).get("team", "?")
     t2 = data["teams"].get(slots[i2], {}).get("team", "?")
     display = match_key.replace('_', ' ')
-    e = make_embed(
-        "🔀 Slots Swapped",
-        f"{Theme.SEP}\n\n**{t1}** `#{slot1}` ↔ `#{slot2}` **{t2}**\n\nIn **{display}**",
-        Theme.ACCENT
-    )
+    e = make_embed("🔀 Slots Swapped", f"{Theme.SEP}\n\n**{t1}** `#{slot1}` ↔ `#{slot2}` **{t2}**\n\nIn **{display}**", Theme.ACCENT)
     await ctx.send(embed=e)
 
 @bot.command(aliases=["mtm", "move"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def move_team(ctx, member: discord.Member, from_match: str, to_match: str):
-    """Move a team between matches."""
     uid = str(member.id)
     fk, tk = from_match.upper(), to_match.upper()
     if fk not in SLOT_LIST_CHANNELS or tk not in SLOT_LIST_CHANNELS:
@@ -1475,18 +1644,13 @@ async def move_team(ctx, member: discord.Member, from_match: str, to_match: str)
         except Exception: pass
     await refresh_table(ctx.guild, tk)
     team = data["teams"].get(uid, {}).get("team", "?")
-    e = make_embed(
-        "➡️ Team Moved",
-        f"**{team}**\n{fk.replace('_',' ')} → {tk.replace('_',' ')}",
-        Theme.ACCENT
-    )
+    e = make_embed("➡️ Team Moved", f"**{team}**\n{fk.replace('_',' ')} → {tk.replace('_',' ')}", Theme.ACCENT)
     await ctx.send(embed=e)
 
 @bot.command(aliases=["rsm"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def reset_match(ctx, match_name: str):
-    """Clear all slots in a match."""
     match_key = match_name.upper()
     if match_key not in SLOT_LIST_CHANNELS:
         await ctx.send(embed=make_embed("❌ Invalid Match", "Check match name.", Theme.ERROR))
@@ -1502,13 +1666,12 @@ async def reset_match(ctx, match_name: str):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def add_role(ctx, member: discord.Member, *, role: discord.Role):
-    """Add a specific role to a player."""
     if role in member.roles:
-        await ctx.send(embed=make_embed("⚠️ Info", f"{member.mention} already has the `{role.name}` role.", Theme.WARNING))
+        await ctx.send(embed=make_embed("⚠️ Info", f"{member.mention} already has `{role.name}`.", Theme.WARNING))
         return
     try:
         await member.add_roles(role)
-        e = make_embed("✅ Role Added", f"Successfully added `{role.name}` to {member.mention}.", Theme.SUCCESS)
+        e = make_embed("✅ Role Added", f"Added `{role.name}` to {member.mention}.", Theme.SUCCESS)
         await ctx.send(embed=e)
     except discord.Forbidden:
         await ctx.send(embed=make_embed("❌ Error", "Missing permissions. Check role hierarchy.", Theme.ERROR))
@@ -1517,13 +1680,12 @@ async def add_role(ctx, member: discord.Member, *, role: discord.Role):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def remove_role(ctx, member: discord.Member, *, role: discord.Role):
-    """Remove a specific role from a player."""
     if role not in member.roles:
-        await ctx.send(embed=make_embed("⚠️ Info", f"{member.mention} does not have the `{role.name}` role.", Theme.WARNING))
+        await ctx.send(embed=make_embed("⚠️ Info", f"{member.mention} does not have `{role.name}`.", Theme.WARNING))
         return
     try:
         await member.remove_roles(role)
-        e = make_embed("✅ Role Removed", f"Successfully removed `{role.name}` from {member.mention}.", Theme.SUCCESS)
+        e = make_embed("✅ Role Removed", f"Removed `{role.name}` from {member.mention}.", Theme.SUCCESS)
         await ctx.send(embed=e)
     except discord.Forbidden:
         await ctx.send(embed=make_embed("❌ Error", "Missing permissions. Check role hierarchy.", Theme.ERROR))
@@ -1532,7 +1694,6 @@ async def remove_role(ctx, member: discord.Member, *, role: discord.Role):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def unverify(ctx, member: discord.Member):
-    """Remove the Verified Team role from a player."""
     role = discord.utils.get(ctx.guild.roles, name=VERIFY_ROLE_NAME)
     if not role:
         await ctx.send(embed=make_embed("❌ Error", f"Role `{VERIFY_ROLE_NAME}` not found.", Theme.ERROR))
@@ -1542,16 +1703,15 @@ async def unverify(ctx, member: discord.Member):
         return
     try:
         await member.remove_roles(role)
-        e = make_embed("✅ Unverified", f"Removed the **{VERIFY_ROLE_NAME}** role from {member.mention}.", Theme.SUCCESS)
+        e = make_embed("✅ Unverified", f"Removed **{VERIFY_ROLE_NAME}** from {member.mention}.", Theme.SUCCESS)
         await ctx.send(embed=e)
     except discord.Forbidden:
-        await ctx.send(embed=make_embed("❌ Error", "Missing permissions to remove the verified role.", Theme.ERROR))
+        await ctx.send(embed=make_embed("❌ Error", "Missing permissions.", Theme.ERROR))
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def stats(ctx):
-    """Show tournament statistics."""
     total_teams = len(data["teams"])
     total_booked = sum(len(v) for v in data["slots"].values())
     total_capacity = MAX_SLOTS * len(SLOT_LIST_CHANNELS)
@@ -1559,12 +1719,9 @@ async def stats(ctx):
     reg_icon = "🟢 Open" if REGISTRATION_OPEN else "🔴 Closed"
     embed = make_embed(
         "📈 Tournament Statistics",
-        f"{Theme.SEP}\n\n"
-        f"**📋 Registered Teams:** `{total_teams}`\n"
+        f"{Theme.SEP}\n\n**📋 Registered Teams:** `{total_teams}`\n"
         f"**🎮 Total Slots Filled:** `{total_booked}/{total_capacity}` ({fill_pct}%)\n"
-        f"**📊 Registration:** {reg_icon}\n\n"
-        f"**Overall:** {Theme.bar(total_booked, total_capacity)}\n\n"
-        f"{Theme.THIN_SEP}",
+        f"**📊 Registration:** {reg_icon}\n\n**Overall:** {Theme.bar(total_booked, total_capacity)}\n\n{Theme.THIN_SEP}",
         Theme.PREMIUM
     )
     for sn in SLOT_LIST_CHANNELS:
@@ -1578,7 +1735,6 @@ async def stats(ctx):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def export_data(ctx):
-    """Export all team data as a formatted message."""
     if not data["teams"]:
         await ctx.send(embed=make_embed("❌ Empty", "No team data to export.", Theme.ERROR))
         return
@@ -1588,7 +1744,7 @@ async def export_data(ctx):
     for uid, info in data["teams"].items():
         team = info.get("team", "?")
         players = ", ".join(info.get("players", [])) or "None"
-        booked = ", ".join([s.replace('_',' ') for s in info.get("booked_slots", [])]) or "None"
+        booked = ", ".join([s.replace('_', ' ') for s in info.get("booked_slots", [])]) or "None"
         paid = "✅" if info.get("paid", False) else "❌"
         lines.append(f"• **{team}** │ <@{uid}> │ {players} │ {booked} │ {paid}")
     output = "\n".join(lines)
@@ -1599,7 +1755,7 @@ async def export_data(ctx):
     else:
         await ctx.send(output)
 
-# ═══════════════════ 13. INTERACTIVE HELP MENU ═══════════════════
+# ═══════════════════ HELP MENU ═══════════════════
 bot.remove_command("help")
 
 class HelpDropdown(discord.ui.Select):
@@ -1610,7 +1766,8 @@ class HelpDropdown(discord.ui.Select):
         ]
         if is_admin:
             options.extend([
-                discord.SelectOption(label="Payment Management", description="Approve, pending, UPI settings", emoji="💰", value="payment"),
+                discord.SelectOption(label="Ticket System", description="Ticket commands", emoji="🎫", value="ticket"),
+                discord.SelectOption(label="Payment Management", description="Approve, pending, UPI", emoji="💰", value="payment"),
                 discord.SelectOption(label="Announcements", description="Announce & schedule", emoji="📢", value="announce"),
                 discord.SelectOption(label="Match Management", description="Setup, lock, notify", emoji="🔧", value="match"),
                 discord.SelectOption(label="Data & Lookup", description="Stats, search, export", emoji="📊", value="data"),
@@ -1621,8 +1778,9 @@ class HelpDropdown(discord.ui.Select):
         pages = {
             "overview": self._overview,
             "player": self._player,
+            "ticket": self._ticket,
             "payment": self._payment,
-            "announce": self._announce,
+            "announce": self._announce, 
             "match": self._match,
             "data": self._data,
         }
@@ -1633,16 +1791,15 @@ class HelpDropdown(discord.ui.Select):
         return make_embed(
             "⚡ Tournament Bot — Command Center",
             f"{Theme.SEP}\n\n"
-            "Welcome to the **Tournament Bot**! This bot manages team registration, "
-            "match slot booking, and tournament operations.\n\n"
+            "Welcome to the **Tournament Bot**!\n\n"
             f"{Theme.THIN_SEP}\n\n"
-            "**🚀 Quick Start:**\n"
+            "**🚀 How to Join:**\n"
             "> `1.` Get verified in the verification channel\n"
             "> `2.` Register your team\n"
-            "> `3.` Pay ₹ platform fee via UPI\n"
-            "> `4.` Open a ticket & send payment screenshot\n"
-            "> `5.` Admin approves → auto-added to all matches\n"
-            "> `6.` Wait for room details before match\n\n"
+            "> `3.` Pay platform fee via UPI\n"
+            "> `4.` Click **Open Payment Ticket** button\n"
+            "> `5.` Send payment screenshot in ticket\n"
+            "> `6.` Admin approves → auto-added to all matches!\n\n"
             "*Use the dropdown below to explore commands.*",
             Theme.PREMIUM
         )
@@ -1651,11 +1808,23 @@ class HelpDropdown(discord.ui.Select):
         return make_embed(
             "👤 Player Commands",
             f"{Theme.SEP}\n\n"
-            "**`!myteam`**\n╰ View your team info, players & matches\n\n"
+            "**`!myteam`**\n╰ View your team info, payment status & matches\n\n"
             "**`!help`**\n╰ Show this interactive help menu\n\n"
             f"{Theme.THIN_SEP}\n"
-            "💡 *Use the buttons in registration & cancel channels for slot management.*",
+            "💡 *After registering, click the Open Ticket button to submit your payment screenshot!*",
             Theme.TEAL
+        )
+
+    def _ticket(self):
+        return make_embed(
+            "🎫 Ticket System",
+            f"{Theme.SEP}\n\n"
+            "**`!close`** (`!ct`)\n╰ Close and delete the current ticket channel\n\n"
+            "**`!add_to_ticket @user`** (`!att`)\n╰ Add another user to see the ticket channel\n\n"
+            "**`!list_tickets`** (`!lt`)\n╰ List all currently open tickets\n\n"
+            f"{Theme.THIN_SEP}\n"
+            "💡 *Ticket channels are auto-created when player clicks Open Payment Ticket button*",
+            Theme.ACCENT
         )
 
     def _payment(self):
@@ -1668,7 +1837,7 @@ class HelpDropdown(discord.ui.Select):
             "**`!setupi <upi_id> <amount> <name>`** (`!supi`)\n╰ Set UPI payment details shown to players\n\n"
             "**`!viewupi`** (`!vupi`)\n╰ View current UPI settings\n\n"
             f"{Theme.THIN_SEP}\n"
-            "💡 *Players register → pay via UPI → open ticket → admin approves*",
+            "💡 *Player registers → pays → opens ticket → sends screenshot → admin approves*",
             Theme.GOLD
         )
 
@@ -1676,8 +1845,8 @@ class HelpDropdown(discord.ui.Select):
         return make_embed(
             "📢 Announcement Commands",
             f"{Theme.SEP}\n\n"
-            "**`!announce #channel message`**\n╰ Send a rich announcement to any channel\n\n"
-            "**`!announce_match MATCH_X message`**\n╰ Announce to a specific match with role ping\n\n"
+            "**`!announce #channel message`**\n╰ Send announcement to any channel\n\n"
+            "**`!announce_match MATCH_X message`**\n╰ Announce to specific match with role ping\n\n"
             "**`!announce_all message`**\n╰ Broadcast to all match channels\n\n"
             "**`!schedule MATCH_X time map mode`**\n╰ Post a match schedule card\n\n"
             "**`!room MATCH_X id password`**\n╰ Send room credentials to players",
@@ -1695,6 +1864,7 @@ class HelpDropdown(discord.ui.Select):
             "**`!notify_start mins [MATCH_X]`** — Alert players\n"
             "**`!force_remove MATCH_X slot#`** — Remove a team\n"
             "**`!reset_match MATCH_X`** — Clear all slots\n"
+            "**`!add_role @user @role`** — Add a role to player\n"
             "**`!remove_role @user @role`** — Remove a role from player\n"
             "**`!unverify @user`** — Remove verified role\n"
             "**`!clear [count]`** — Purge messages",
@@ -1723,12 +1893,11 @@ class HelpView(discord.ui.View):
 
 @bot.command()
 async def help(ctx):
-    """Interactive help menu with dropdown categories."""
     is_admin = ctx.author.guild_permissions.administrator
     embed = HelpDropdown(is_admin)._overview()
     await ctx.send(embed=embed, view=HelpView(is_admin), delete_after=120)
 
-# ═══════════════════ 14. ERROR HANDLER ═══════════════════
+# ═══════════════════ ERROR HANDLER ═══════════════════
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
@@ -1740,10 +1909,10 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.CheckFailure):
         pass
     elif isinstance(error, commands.BadArgument):
-        e = make_embed("⚠️ Invalid Argument", "Check your command syntax and try again.\nUse `!help` for reference.", Theme.WARNING)
+        e = make_embed("⚠️ Invalid Argument", "Check your command syntax and try again.", Theme.WARNING)
         await ctx.send(embed=e, delete_after=10)
     elif isinstance(error, commands.CommandNotFound):
-        e = make_embed("❓ Unknown Command", "That command doesn't exist.\nUse `!help` to see available commands.", Theme.DARK)
+        e = make_embed("❓ Unknown Command", "Use `!help` to see available commands.", Theme.DARK)
         await ctx.send(embed=e, delete_after=10)
     else:
         e = make_embed("❌ Error", f"```{str(error)[:200]}```", Theme.ERROR)
@@ -1751,5 +1920,5 @@ async def on_command_error(ctx, error):
         print(f"[ERROR] {error}")
 
 if __name__ == "__main__":
-    keep_alive.keep_alive()  
+    keep_alive.keep_alive()
     bot.run(TOKEN)
