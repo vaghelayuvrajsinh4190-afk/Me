@@ -2,5 +2,4 @@
 discord.py>=2.0.0
 
 # Web Server (for keep_alive functionality)
-Flask>=3.0.0
-
+Flask>=0.0.0
