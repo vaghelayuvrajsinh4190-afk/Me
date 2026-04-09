@@ -965,6 +965,11 @@ class MainRegisterView(discord.ui.View):
     
     @discord.ui.button(label="「📝」Register Your Squad", style=discord.ButtonStyle.green, custom_id="reg_btn")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not REGISTRATION_OPEN:
+            e = make_embed("⛔ Registration Closed", "Registration is currently locked. Please wait for the next round.", Theme.WARNING)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
         uid = str(interaction.user.id)
         if uid in data["teams"]:
             last_updated = data["teams"][uid].get("last_updated")
