@@ -127,7 +127,16 @@ def load_data():
             "part_names": {"1": "Part 1 - Matches 1 to 4", "2": "Part 2 - Matches 5 to 8"},
             "part_status": {"1": True, "2": True},
             "verify_timeout_minutes": 5,
-            "open_tickets": {}
+            "open_tickets": {},
+            "points_system": {
+                "kill_points": 1,
+                "position_points": {
+                    "1": 15, "2": 12, "3": 10, "4": 8, "5": 6,
+                    "6": 4, "7": 2, "8": 1, "9": 0, "10": 0,
+                    "11": 0, "12": 0, "13": 0, "14": 0, "15": 0, "16": 0
+                }
+            },
+            "match_results": {}
         }
         with open(DATA_FILE, "w") as f:
             json.dump(default_data, f, indent=4)
@@ -153,6 +162,19 @@ def load_data():
             dirty = True
         if "open_tickets" not in data:
             data["open_tickets"] = {}
+            dirty = True
+        if "points_system" not in data:
+            data["points_system"] = {
+                "kill_points": 1,
+                "position_points": {
+                    "1": 15, "2": 12, "3": 10, "4": 8, "5": 6,
+                    "6": 4, "7": 2, "8": 1, "9": 0, "10": 0,
+                    "11": 0, "12": 0, "13": 0, "14": 0, "15": 0, "16": 0
+                }
+            }
+            dirty = True
+        if "match_results" not in data:
+            data["match_results"] = {}
             dirty = True
         for k in SLOT_LIST_CHANNELS:
             if k not in data.get("slots", {}):
@@ -2251,22 +2273,467 @@ async def dm_all(ctx, *, message: str):
     )
     await progress_msg.edit(embed=final_embed)
 
+# ═══════════════════ 12C. POINTS & LEADERBOARD ═══════════════════
+
+DEFAULT_POSITION_POINTS = {
+    "1": 15, "2": 12, "3": 10, "4": 8, "5": 6,
+    "6": 4, "7": 2, "8": 1, "9": 0, "10": 0,
+    "11": 0, "12": 0, "13": 0, "14": 0, "15": 0, "16": 0
+}
+
+RANK_EMOJIS = {
+    1: "🥇", 2: "🥈", 3: "🥉",
+    4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣",
+    9: "9️⃣", 10: "🔟"
+}
+
+def get_rank_emoji(rank):
+    return RANK_EMOJIS.get(rank, f"`{rank}.`")
+
+@bot.command(name="setpoints", aliases=["sp"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def set_points(ctx, kill_points: int = None):
+    """View or set the kill points value. Usage: !setpoints 1"""
+    ps = data.get("points_system", {})
+
+    if kill_points is None:
+        # Show current settings
+        kp = ps.get("kill_points", 1)
+        pp = ps.get("position_points", DEFAULT_POSITION_POINTS)
+        pos_lines = []
+        for pos in sorted(pp.keys(), key=lambda x: int(x)):
+            pts = pp[pos]
+            if pts > 0:
+                medal = get_rank_emoji(int(pos))
+                pos_lines.append(f"> {medal} Position **#{pos}** → `{pts}` pts")
+        pos_str = "\n".join(pos_lines) if pos_lines else "> No position points set"
+
+        embed = make_embed(
+            "🏅 Current Points System",
+            f"{Theme.SEP}\n\n"
+            f"**💀 Kill Points:** `{kp}` per kill\n\n"
+            f"**🏆 Position Points:**\n{pos_str}\n\n"
+            f"{Theme.THIN_SEP}\n"
+            f"*Use `!setpoints <kill_pts>` to change kill points.*\n"
+            f"*Use `!setposition <pos> <pts>` to change position points.*",
+            Theme.GOLD
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if kill_points < 0:
+        await ctx.send(embed=make_embed("❌ Invalid", "Kill points must be 0 or positive.", Theme.ERROR))
+        return
+
+    ps["kill_points"] = kill_points
+    data["points_system"] = ps
+    save_data(data)
+
+    embed = make_embed(
+        "✅ Kill Points Updated",
+        f"{Theme.SEP}\n\n"
+        f"**💀 Kill Points:** `{kill_points}` per kill\n\n"
+        f"{Theme.SEP}",
+        Theme.SUCCESS
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="setposition", aliases=["spos"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def set_position(ctx, position: int, points: int):
+    """Set points for a specific position. Usage: !setposition 1 15"""
+    if position < 1 or position > 16:
+        await ctx.send(embed=make_embed("❌ Invalid", "Position must be between 1 and 16.", Theme.ERROR))
+        return
+    if points < 0:
+        await ctx.send(embed=make_embed("❌ Invalid", "Points must be 0 or positive.", Theme.ERROR))
+        return
+
+    ps = data.get("points_system", {})
+    if "position_points" not in ps:
+        ps["position_points"] = DEFAULT_POSITION_POINTS.copy()
+    ps["position_points"][str(position)] = points
+    data["points_system"] = ps
+    save_data(data)
+
+    medal = get_rank_emoji(position)
+    embed = make_embed(
+        "✅ Position Points Updated",
+        f"{Theme.SEP}\n\n"
+        f"{medal} Position **#{position}** → `{points}` pts\n\n"
+        f"{Theme.SEP}",
+        Theme.SUCCESS
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="addresult", aliases=["ar2"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def add_result(ctx, match_name: str, team_name: str, kills: int, position: int):
+    """Add a team's match result. Usage: !addresult MATCH_1 TeamName 5 1"""
+    match_key = match_name.upper()
+    if match_key not in SLOT_LIST_CHANNELS:
+        await ctx.send(embed=make_embed("❌ Invalid Match", "Use: `MATCH_1` to `MATCH_8`", Theme.ERROR))
+        return
+
+    if position < 1 or position > 16:
+        await ctx.send(embed=make_embed("❌ Invalid Position", "Position must be between 1 and 16.", Theme.ERROR))
+        return
+
+    if kills < 0:
+        await ctx.send(embed=make_embed("❌ Invalid Kills", "Kills must be 0 or positive.", Theme.ERROR))
+        return
+
+    # Calculate points
+    ps = data.get("points_system", {})
+    kill_pts = ps.get("kill_points", 1) * kills
+    pos_pts = ps.get("position_points", DEFAULT_POSITION_POINTS).get(str(position), 0)
+    total_pts = kill_pts + pos_pts
+
+    # Store result
+    if "match_results" not in data:
+        data["match_results"] = {}
+    if match_key not in data["match_results"]:
+        data["match_results"][match_key] = {}
+
+    # Use team_name as key (lowercase for consistency)
+    team_key = team_name.strip().lower()
+    data["match_results"][match_key][team_key] = {
+        "team_name": team_name.strip(),
+        "kills": kills,
+        "position": position,
+        "position_points": pos_pts,
+        "kill_points": kill_pts,
+        "total_points": total_pts
+    }
+    save_data(data)
+
+    medal = get_rank_emoji(position)
+    display = match_key.replace("_", " ")
+    embed = make_embed(
+        f"✅ Result Added — {display}",
+        f"{Theme.SEP}\n\n"
+        f"**🏷️ Team:** {team_name}\n"
+        f"{medal} **Position:** #{position} → `{pos_pts}` pts\n"
+        f"💀 **Kills:** {kills} → `{kill_pts}` pts\n\n"
+        f"**🏆 Total:** `{total_pts}` points\n\n"
+        f"{Theme.SEP}",
+        Theme.SUCCESS
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="matchresults", aliases=["mr"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def match_results(ctx, match_name: str):
+    """Show results for a specific match. Usage: !matchresults MATCH_1"""
+    match_key = match_name.upper()
+    if match_key not in SLOT_LIST_CHANNELS:
+        await ctx.send(embed=make_embed("❌ Invalid Match", "Use: `MATCH_1` to `MATCH_8`", Theme.ERROR))
+        return
+
+    results = data.get("match_results", {}).get(match_key, {})
+    if not results:
+        await ctx.send(embed=make_embed("❌ No Results", f"No results recorded for **{match_key.replace('_', ' ')}**.", Theme.ERROR))
+        return
+
+    # Sort by position
+    sorted_results = sorted(results.values(), key=lambda x: x.get("position", 99))
+    display = match_key.replace("_", " ")
+
+    lines = []
+    for r in sorted_results:
+        pos = r.get("position", "?")
+        medal = get_rank_emoji(pos) if isinstance(pos, int) else f"`{pos}.`"
+        team = r.get("team_name", "?")
+        kills = r.get("kills", 0)
+        total = r.get("total_points", 0)
+        lines.append(f"{medal} **{team}** — 💀 `{kills}` kills — 🏆 `{total}` pts")
+
+    result_text = "\n".join(lines)
+    total_kills = sum(r.get("kills", 0) for r in sorted_results)
+
+    embed = make_embed(
+        f"📊 {display} — Match Results",
+        f"{Theme.SEP}\n\n"
+        f"{result_text}\n\n"
+        f"{Theme.THIN_SEP}\n"
+        f"**Teams Recorded:** `{len(sorted_results)}`  •  **Total Kills:** `{total_kills}`\n\n"
+        f"{Theme.SEP}",
+        Theme.GOLD,
+        f"Results for {display}"
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="leaderboard", aliases=["lb"])
+async def leaderboard(ctx):
+    """Show the overall tournament leaderboard."""
+    all_results = data.get("match_results", {})
+    if not all_results:
+        await ctx.send(embed=make_embed("❌ No Results", "No match results have been recorded yet.", Theme.ERROR))
+        return
+
+    # Aggregate all teams across all matches
+    team_totals = {}  # team_key -> {team_name, total_kills, total_points, matches_played, best_position}
+    for match_key, results in all_results.items():
+        for team_key, r in results.items():
+            if team_key not in team_totals:
+                team_totals[team_key] = {
+                    "team_name": r.get("team_name", "?"),
+                    "total_kills": 0,
+                    "total_points": 0,
+                    "matches_played": 0,
+                    "best_position": 99,
+                    "total_position_pts": 0,
+                    "total_kill_pts": 0
+                }
+            team_totals[team_key]["total_kills"] += r.get("kills", 0)
+            team_totals[team_key]["total_points"] += r.get("total_points", 0)
+            team_totals[team_key]["total_position_pts"] += r.get("position_points", 0)
+            team_totals[team_key]["total_kill_pts"] += r.get("kill_points", 0)
+            team_totals[team_key]["matches_played"] += 1
+            pos = r.get("position", 99)
+            if pos < team_totals[team_key]["best_position"]:
+                team_totals[team_key]["best_position"] = pos
+
+    # Sort by total points (descending), then by kills as tiebreaker
+    sorted_teams = sorted(
+        team_totals.values(),
+        key=lambda x: (x["total_points"], x["total_kills"]),
+        reverse=True
+    )
+
+    # Build leaderboard
+    lines = []
+    for rank, t in enumerate(sorted_teams[:20], 1):
+        medal = get_rank_emoji(rank)
+        name = t["team_name"]
+        if len(name) > 18:
+            name = name[:16] + ".."
+        pts = t["total_points"]
+        kills = t["total_kills"]
+        matches = t["matches_played"]
+        best = t["best_position"]
+        lines.append(
+            f"{medal} **{name}** — `{pts}` pts  •  💀 `{kills}`  •  🎮 `{matches}` matches  •  Best: `#{best}`"
+        )
+
+    lb_text = "\n".join(lines)
+    total_matches_recorded = len(all_results)
+    total_teams = len(sorted_teams)
+
+    # Highlight top 3
+    podium = ""
+    if len(sorted_teams) >= 3:
+        podium = (
+            f"\n🥇 **{sorted_teams[0]['team_name']}** — `{sorted_teams[0]['total_points']}` pts\n"
+            f"🥈 **{sorted_teams[1]['team_name']}** — `{sorted_teams[1]['total_points']}` pts\n"
+            f"🥉 **{sorted_teams[2]['team_name']}** — `{sorted_teams[2]['total_points']}` pts\n"
+        )
+    elif len(sorted_teams) >= 1:
+        podium = f"\n🥇 **{sorted_teams[0]['team_name']}** — `{sorted_teams[0]['total_points']}` pts\n"
+
+    embed = make_embed(
+        "🏆 Tournament Leaderboard",
+        f"{Theme.SEP}\n"
+        f"{podium}\n"
+        f"{Theme.THIN_SEP}\n\n"
+        f"{lb_text}\n\n"
+        f"{Theme.THIN_SEP}\n"
+        f"**📊 Stats:** `{total_teams}` teams  •  `{total_matches_recorded}` matches recorded\n\n"
+        f"{Theme.SEP}",
+        Theme.GOLD,
+        "🏆 Overall Tournament Standings"
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="mvp", aliases=["topper"])
+async def mvp(ctx, match_name: str = None):
+    """Show the MVP (top killer) of a match or overall. Usage: !mvp [MATCH_X]"""
+    if match_name:
+        match_key = match_name.upper()
+        if match_key not in SLOT_LIST_CHANNELS:
+            await ctx.send(embed=make_embed("❌ Invalid Match", "Use: `MATCH_1` to `MATCH_8`", Theme.ERROR))
+            return
+        results = data.get("match_results", {}).get(match_key, {})
+        if not results:
+            await ctx.send(embed=make_embed("❌ No Results", f"No results for **{match_key.replace('_', ' ')}**.", Theme.ERROR))
+            return
+        # Find top killer in this match
+        top = max(results.values(), key=lambda x: x.get("kills", 0))
+        display = match_key.replace("_", " ")
+        embed = make_embed(
+            f"⭐ MVP — {display}",
+            f"{Theme.SEP}\n\n"
+            f"**🏷️ Team:** {top['team_name']}\n"
+            f"💀 **Kills:** `{top.get('kills', 0)}`\n"
+            f"{get_rank_emoji(top.get('position', 1))} **Position:** #{top.get('position', '?')}\n"
+            f"🏆 **Points:** `{top.get('total_points', 0)}`\n\n"
+            f"{Theme.SEP}",
+            Theme.GOLD,
+            f"Match MVP — {display}"
+        )
+        await ctx.send(embed=embed)
+    else:
+        # Overall MVP — team with most total kills
+        all_results = data.get("match_results", {})
+        if not all_results:
+            await ctx.send(embed=make_embed("❌ No Results", "No match results recorded yet.", Theme.ERROR))
+            return
+        team_kills = {}
+        for match_key, results in all_results.items():
+            for team_key, r in results.items():
+                if team_key not in team_kills:
+                    team_kills[team_key] = {"team_name": r.get("team_name", "?"), "total_kills": 0, "matches": 0}
+                team_kills[team_key]["total_kills"] += r.get("kills", 0)
+                team_kills[team_key]["matches"] += 1
+        top = max(team_kills.values(), key=lambda x: x["total_kills"])
+        embed = make_embed(
+            "⭐ Tournament MVP",
+            f"{Theme.SEP}\n\n"
+            f"**🏷️ Team:** {top['team_name']}\n"
+            f"💀 **Total Kills:** `{top['total_kills']}`\n"
+            f"🎮 **Matches Played:** `{top['matches']}`\n"
+            f"📊 **Avg Kills/Match:** `{top['total_kills'] / top['matches']:.1f}`\n\n"
+            f"{Theme.SEP}",
+            Theme.GOLD,
+            "Overall Tournament MVP"
+        )
+        await ctx.send(embed=embed)
+
+@bot.command(name="resetresults", aliases=["rr2"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def reset_results(ctx, match_name: str):
+    """Clear results for a specific match. Usage: !resetresults MATCH_1"""
+    match_key = match_name.upper()
+    if match_key not in SLOT_LIST_CHANNELS:
+        await ctx.send(embed=make_embed("❌ Invalid Match", "Use: `MATCH_1` to `MATCH_8`", Theme.ERROR))
+        return
+
+    count = len(data.get("match_results", {}).get(match_key, {}))
+    if match_key in data.get("match_results", {}):
+        del data["match_results"][match_key]
+        save_data(data)
+
+    display = match_key.replace("_", " ")
+    embed = make_embed(
+        "🔄 Results Reset",
+        f"{Theme.SEP}\n\n"
+        f"Cleared **{count}** team results from **{display}**.\n\n"
+        f"{Theme.SEP}",
+        Theme.ORANGE
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="resetallresults", aliases=["rar"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def reset_all_results(ctx):
+    """Clear ALL match results and leaderboard data."""
+    total_matches = len(data.get("match_results", {}))
+    total_entries = sum(len(v) for v in data.get("match_results", {}).values())
+    data["match_results"] = {}
+    save_data(data)
+
+    embed = make_embed(
+        "🔄 All Results Reset",
+        f"{Theme.SEP}\n\n"
+        f"Cleared **{total_entries}** results across **{total_matches}** matches.\n"
+        f"Leaderboard has been reset to zero.\n\n"
+        f"{Theme.SEP}",
+        Theme.ORANGE
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="postleaderboard", aliases=["plb"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def post_leaderboard(ctx, channel: discord.TextChannel):
+    """Post the leaderboard to a specific channel. Usage: !postleaderboard #channel"""
+    # Reuse leaderboard logic
+    all_results = data.get("match_results", {})
+    if not all_results:
+        await ctx.send(embed=make_embed("❌ No Results", "No match results have been recorded yet.", Theme.ERROR))
+        return
+
+    team_totals = {}
+    for match_key, results in all_results.items():
+        for team_key, r in results.items():
+            if team_key not in team_totals:
+                team_totals[team_key] = {
+                    "team_name": r.get("team_name", "?"),
+                    "total_kills": 0,
+                    "total_points": 0,
+                    "matches_played": 0,
+                    "best_position": 99
+                }
+            team_totals[team_key]["total_kills"] += r.get("kills", 0)
+            team_totals[team_key]["total_points"] += r.get("total_points", 0)
+            team_totals[team_key]["matches_played"] += 1
+            pos = r.get("position", 99)
+            if pos < team_totals[team_key]["best_position"]:
+                team_totals[team_key]["best_position"] = pos
+
+    sorted_teams = sorted(
+        team_totals.values(),
+        key=lambda x: (x["total_points"], x["total_kills"]),
+        reverse=True
+    )
+
+    lines = []
+    for rank, t in enumerate(sorted_teams[:20], 1):
+        medal = get_rank_emoji(rank)
+        name = t["team_name"]
+        if len(name) > 18:
+            name = name[:16] + ".."
+        pts = t["total_points"]
+        kills = t["total_kills"]
+        lines.append(f"{medal} **{name}** — `{pts}` pts  •  💀 `{kills}` kills")
+
+    lb_text = "\n".join(lines)
+
+    podium = ""
+    if len(sorted_teams) >= 3:
+        podium = (
+            f"\n🥇 **{sorted_teams[0]['team_name']}** — `{sorted_teams[0]['total_points']}` pts\n"
+            f"🥈 **{sorted_teams[1]['team_name']}** — `{sorted_teams[1]['total_points']}` pts\n"
+            f"🥉 **{sorted_teams[2]['team_name']}** — `{sorted_teams[2]['total_points']}` pts\n"
+        )
+
+    embed = make_embed(
+        "🏆 Tournament Leaderboard",
+        f"{Theme.SEP}\n"
+        f"{podium}\n"
+        f"{Theme.THIN_SEP}\n\n"
+        f"{lb_text}\n\n"
+        f"{Theme.SEP}",
+        Theme.GOLD,
+        "🏆 Overall Tournament Standings"
+    )
+    await channel.send(embed=embed)
+    await ctx.send(embed=make_embed("✅ Posted", f"Leaderboard posted to {channel.mention}", Theme.SUCCESS), delete_after=5)
+    await ctx.message.delete()
+
 # ═══════════════════ 13. INTERACTIVE HELP MENU ═══════════════════
 bot.remove_command("help")
 
 class HelpDropdown(discord.ui.Select):
     def __init__(self, is_admin):
         options = [
-            discord.SelectOption(label="Overview", description="Bot info & quick start", emoji="🏠", value="overview", default=True),
-            discord.SelectOption(label="Player Commands", description="Commands for everyone", emoji="👤", value="player"),
+            discord.SelectOption(label="Overview", description="Bot info & quick start guide", emoji="🏠", value="overview", default=True),
+            discord.SelectOption(label="Player Commands (3)", description="Commands available to everyone", emoji="👤", value="player"),
         ]
         if is_admin:
             options.extend([
-                discord.SelectOption(label="Payment Management", description="Approve, pending, UPI settings", emoji="💰", value="payment"),
-                discord.SelectOption(label="Announcements", description="Announce & schedule", emoji="📢", value="announce"),
-                discord.SelectOption(label="Match Management", description="Setup, lock, notify", emoji="🔧", value="match"),
-                discord.SelectOption(label="DM Broadcast", description="DM specific or all members", emoji="📩", value="dm"),
-                discord.SelectOption(label="Data & Lookup", description="Stats, search, export", emoji="📊", value="data"),
+                discord.SelectOption(label="Payment Management (5)", description="Approve, pending, UPI settings", emoji="💰", value="payment"),
+                discord.SelectOption(label="Announcements (5)", description="Announce, schedule & room details", emoji="📢", value="announce"),
+                discord.SelectOption(label="Match Management (12)", description="Setup, lock, notify, roles", emoji="🔧", value="match"),
+                discord.SelectOption(label="Leaderboard (9)", description="Points, results, MVP, rankings", emoji="🏆", value="leaderboard"),
+                discord.SelectOption(label="DM Broadcast (2)", description="DM specific or all members", emoji="📩", value="dm"),
+                discord.SelectOption(label="Data & Lookup (8)", description="Stats, search, export data", emoji="📊", value="data"),
             ])
         super().__init__(placeholder="📖 Select a category...", min_values=1, max_values=1, options=options)
 
@@ -2277,6 +2744,7 @@ class HelpDropdown(discord.ui.Select):
             "payment": self._payment,
             "announce": self._announce,
             "match": self._match,
+            "leaderboard": self._leaderboard,
             "dm": self._dm,
             "data": self._data,
         }
@@ -2284,11 +2752,26 @@ class HelpDropdown(discord.ui.Select):
         await interaction.response.edit_message(embed=embed)
 
     def _overview(self):
-        return make_embed(
+        # Live stats
+        total_teams = len(data.get("teams", {}))
+        total_booked = sum(len(v) for v in data.get("slots", {}).values())
+        total_cap = MAX_SLOTS * len(SLOT_LIST_CHANNELS)
+        fill_pct = int((total_booked / total_cap) * 100) if total_cap else 0
+        reg_icon = "🟢 Open" if REGISTRATION_OPEN else "🔴 Closed"
+        paid_count = sum(1 for t in data.get("teams", {}).values() if t.get("paid"))
+        pending_count = total_teams - paid_count
+
+        embed = make_embed(
             "⚡ Tournament Bot — Command Center",
             f"{Theme.SEP}\n\n"
             "Welcome to the **Tournament Bot**! This bot manages team registration, "
             "match slot booking, and tournament operations.\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            "**📊 Live Stats:**\n"
+            f"> 📋 Registered Teams: **{total_teams}**\n"
+            f"> 🎮 Slots Filled: **{total_booked}/{total_cap}** ({fill_pct}%) {Theme.bar(total_booked, total_cap, 10)}\n"
+            f"> 💰 Paid: **{paid_count}** • Pending: **{pending_count}**\n"
+            f"> 📝 Registration: {reg_icon}\n\n"
             f"{Theme.THIN_SEP}\n\n"
             "**🚀 Quick Start:**\n"
             "> `1.` Get verified in the verification channel\n"
@@ -2298,109 +2781,258 @@ class HelpDropdown(discord.ui.Select):
             "> `5.` Open a ticket & send payment screenshot\n"
             "> `6.` Admin approves → auto-added to your part's matches\n"
             "> `7.` Wait for room details before match\n\n"
-            "*Use the dropdown below to explore commands.*",
-            Theme.PREMIUM
+            "*Use the dropdown below to explore all commands.*\n\n"
+            f"{Theme.SEP}",
+            Theme.PREMIUM,
+            "📖 Page 1/7 • Overview"
         )
+        return embed
 
     def _player(self):
-        return make_embed(
-            "👤 Player Commands",
+        embed = make_embed(
+            "👤 Player Commands  ·  `3 commands`",
             f"{Theme.SEP}\n\n"
-            "**`!myteam`**\n╰ View your team info, players & matches\n\n"
-            "**`!help`**\n╰ Show this interactive help menu\n\n"
-            f"{Theme.THIN_SEP}\n"
-            "💡 *Use the buttons in registration & cancel channels for slot management.*",
-            Theme.TEAL
+            "**`!myteam`** · aliases: `!mt`\n"
+            "╰ View your team info, players, payment status & active matches\n\n"
+            "**`!leaderboard`** · aliases: `!lb`\n"
+            "╰ View the overall tournament leaderboard & rankings\n\n"
+            "**`!help`**\n"
+            "╰ Show this interactive help menu\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            "**🎮 Interactive Features:**\n"
+            "> 📝 Register button → Team form → Part selection → Payment\n"
+            "> ⚡ Auto-assign button → Instantly join an open match\n"
+            "> 🗑️ Leave match dropdown → Cancel specific or all matches\n"
+            "> 🛡️ Verify button → Squad consent via DMs\n"
+            "> 🎫 Ticket button → Open payment ticket\n\n"
+            "💡 *All interactive features use buttons & dropdowns in their channels.*",
+            Theme.TEAL,
+            "📖 Page 2/8 • Player Commands"
         )
+        return embed
 
     def _payment(self):
-        return make_embed(
-            "💰 Payment Management",
+        embed = make_embed(
+            "💰 Payment Management  ·  `5 commands`",
             f"{Theme.SEP}\n\n"
-            "**`!approve @user`** (`!ap`)\n╰ Approve payment → auto-add to selected part's matches + DM\n\n"
-            "**`!unapprove @user`** (`!uap`)\n╰ Reverse approval → remove from all matches\n\n"
-            "**`!pending`** (`!pd`)\n╰ Show all teams with unpaid payments\n\n"
-            "**`!setupi <upi_id> <amount> <name>`** (`!supi`)\n╰ Set UPI payment details shown to players\n\n"
-            "**`!viewupi`** (`!vupi`)\n╰ View current UPI settings\n\n"
-            f"{Theme.THIN_SEP}\n"
-            "💡 *Players register → select part → pay via UPI → admin approves*",
-            Theme.GOLD
+            "**`!approve @user`** · aliases: `!ap`\n"
+            "╰ Approve payment → auto-add to selected part's 4 matches + DM notification\n\n"
+            "**`!unapprove @user`** · aliases: `!uap`\n"
+            "╰ Reverse approval → remove from all matches + revoke roles\n\n"
+            "**`!pending`** · aliases: `!pd`\n"
+            "╰ Show all teams with unpaid/pending payments\n\n"
+            "**`!setupi <upi_id> <amount> <name>`** · aliases: `!supi`\n"
+            "╰ Configure UPI payment details shown to players\n\n"
+            "**`!viewupi`** · aliases: `!vupi`\n"
+            "╰ View current UPI settings\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            "**💡 Payment Flow:**\n"
+            "> Register → Select Part → Pay UPI → Open Ticket → Screenshot → Admin Approves",
+            Theme.GOLD,
+            "📖 Page 3/8 • Payment Management"
         )
+        return embed
 
     def _announce(self):
-        return make_embed(
-            "📢 Announcement Commands",
+        embed = make_embed(
+            "📢 Announcements  ·  `5 commands`",
             f"{Theme.SEP}\n\n"
-            "**`!announce #channel message`**\n╰ Send a rich announcement to any channel\n\n"
-            "**`!announce_match MATCH_X message`**\n╰ Announce to a specific match with role ping\n\n"
-            "**`!announce_all message`**\n╰ Broadcast to all match channels\n\n"
-            "**`!schedule MATCH_X time map mode`**\n╰ Post a match schedule card\n\n"
-            "**`!room MATCH_X id password`**\n╰ Send room credentials to players",
-            Theme.ORANGE
+            "**`!announce #channel message`** · aliases: `!ann`\n"
+            "╰ Send a rich announcement embed to any channel\n\n"
+            "**`!announce_match MATCH_X message`** · aliases: `!am`\n"
+            "╰ Announce to a specific match channel with role ping\n\n"
+            "**`!announce_all message`** · aliases: `!aa`\n"
+            "╰ Broadcast to ALL match channels simultaneously\n\n"
+            "**`!schedule MATCH_X time map mode`** · aliases: `!sch`\n"
+            "╰ Post a detailed match schedule card\n\n"
+            "**`!room MATCH_X id password`** · aliases: `!r`\n"
+            "╰ Send confidential room credentials to players\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            "**📝 Examples:**\n"
+            "> `!announce #general Tournament starts at 8 PM!`\n"
+            "> `!room MATCH_1 12345678 abc123`",
+            Theme.ORANGE,
+            "📖 Page 4/8 • Announcements"
         )
+        return embed
 
     def _match(self):
-        return make_embed(
-            "🔧 Match Management",
+        embed = make_embed(
+            "🔧 Match Management  ·  `12 commands`",
             f"{Theme.SEP}\n\n"
-            "**`!setup`** — Initialize all bot panels\n"
-            "**`!setup_verify`** — Setup verification panel\n"
-            "**`!init_tables`** — Refresh all live tables\n"
-            "**`!lock`** / **`!unlock`** — Toggle registration\n"
-            "**`!notify_start mins [MATCH_X]`** — Alert players\n"
-            "**`!force_remove MATCH_X slot#`** — Remove a team\n"
-            "**`!reset_match MATCH_X`** — Clear all slots\n"
-            "**`!rename_part <1|2> <name>`** — Rename Part 1/2\n"
-            "**`!toggle_part <1|2>`** — Open/Close Part 1/2\n"
-            "**`!set_timeout <min>`** — Set verify timeout\n"
-            "**`!unverify @user`** — Remove verified role\n"
-            "**`!clear [count]`** — Purge messages",
-            Theme.ROSE
+            "**⚙️ Setup & Panels**\n"
+            "> `!setup` (`!set`) — Initialize all bot panels\n"
+            "> `!setup_verify` (`!sv`) — Setup verification panel\n"
+            "> `!init_tables` (`!it`) — Refresh all live tables\n\n"
+            "**🔒 Registration Control**\n"
+            "> `!lock` (`!l`) — Lock registration & claims\n"
+            "> `!unlock` (`!ul`) — Unlock registration\n"
+            "> `!notify_start <mins> [MATCH_X]` (`!ns`) — Alert players\n\n"
+            "**🗑️ Slot Management**\n"
+            "> `!force_remove MATCH_X <slot#>` (`!fr`) — Remove a team\n"
+            "> `!reset_match MATCH_X` (`!rsm`) — Clear all slots\n\n"
+            "**🎮 Part Configuration**\n"
+            "> `!rename_part <1|2> <name>` (`!rp`) — Rename Part 1/2\n"
+            "> `!toggle_part <1|2>` (`!tp`) — Open/Close Part 1/2\n\n"
+            "**🛡️ Verification**\n"
+            "> `!set_timeout <min>` (`!stt`) — Set verify timeout\n"
+            "> `!unverify @user` (`!uv`) — Remove verified role\n\n"
+            "**🧹 Utility**\n"
+            "> `!clear [count]` (`!c`) — Purge messages",
+            Theme.ROSE,
+            "📖 Page 5/8 • Match Management"
         )
+        return embed
+
+    def _leaderboard(self):
+        embed = make_embed(
+            "🏆 Leaderboard & Results  ·  `9 commands`",
+            f"{Theme.SEP}\n\n"
+            "**⚙️ Points Configuration**\n"
+            "> `!setpoints [kill_pts]` (`!sp`) — View/set kill points\n"
+            "> `!setposition <pos> <pts>` (`!spos`) — Set position points\n\n"
+            "**📝 Match Results**\n"
+            "> `!addresult MATCH_X <team> <kills> <pos>` (`!ar2`) — Add result\n"
+            "> `!matchresults MATCH_X` (`!mr`) — View match results\n\n"
+            "**🏆 Rankings**\n"
+            "> `!leaderboard` (`!lb`) — Overall standings (public)\n"
+            "> `!mvp [MATCH_X]` — Match or overall MVP\n"
+            "> `!postleaderboard #channel` (`!plb`) — Post to channel\n\n"
+            "**🔄 Reset**\n"
+            "> `!resetresults MATCH_X` (`!rr2`) — Clear match results\n"
+            "> `!resetallresults` (`!rar`) — Clear all results\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            "**📝 Example Workflow:**\n"
+            "> `!addresult MATCH_1 TeamAlpha 8 1`\n"
+            "> `!addresult MATCH_1 TeamBeta 5 2`\n"
+            "> `!matchresults MATCH_1` → View results\n"
+            "> `!leaderboard` → See overall rankings",
+            Theme.GOLD,
+            "📖 Page 6/8 • Leaderboard"
+        )
+        return embed
 
     def _dm(self):
-        return make_embed(
-            "📩 DM Broadcast",
+        embed = make_embed(
+            "📩 DM Broadcast  ·  `2 commands`",
             f"{Theme.SEP}\n\n"
-            "**`!dm @user1 @user2 message`** (`!dm`)\n"
-            "╰ Send a DM to specific mentioned members\n\n"
-            "**`!dmall message`** (`!dma`)\n"
-            "╰ Broadcast a DM to **all** server members\n\n"
+            "**`!dm @user1 @user2 message`**\n"
+            "╰ Send a DM to specific mentioned members\n"
+            "╰ Works with 1 or multiple members\n\n"
+            "**`!dmall message`** · aliases: `!dma`\n"
+            "╰ Broadcast a DM to **all** server members\n"
+            "╰ Live progress bar while sending\n"
+            "╰ Skips bots automatically\n\n"
             f"{Theme.THIN_SEP}\n\n"
-            "**📝 Usage Examples:**\n"
+            "**📝 Examples:**\n"
             "> `!dm @Player1 @Player2 Your match starts in 10 mins!`\n"
             "> `!dmall Tournament starts tomorrow at 8 PM IST!`\n\n"
             "💡 *The `message:` prefix is optional.*\n"
-            "💡 *Bot skips members with DMs disabled and reports failures.*",
-            Theme.PREMIUM
+            "💡 *Bot reports delivery failures if a member has DMs disabled.*",
+            Theme.PREMIUM,
+            "📖 Page 7/8 • DM Broadcast"
         )
+        return embed
 
     def _data(self):
-        return make_embed(
-            "📊 Data & Lookup",
+        embed = make_embed(
+            "📊 Data & Lookup  ·  `8 commands`",
             f"{Theme.SEP}\n\n"
-            "**`!status`** — Live tournament dashboard\n"
-            "**`!stats`** — Statistics overview\n"
-            "**`!teaminfo name`** — Lookup team by name\n"
-            "**`!whois @user`** — Find a player's team\n"
-            "**`!update_team @user NewName`** — Rename team\n"
-            "**`!swap_slot MATCH_X s1 s2`** — Swap two slots\n"
-            "**`!move_team @user FROM TO`** — Transfer team\n"
-            "**`!export`** — Export all team data",
-            Theme.ACCENT
+            "**📈 Dashboards**\n"
+            "> `!status` (`!st`) — Live tournament dashboard\n"
+            "> `!stats` (`!s`) — Detailed statistics overview\n\n"
+            "**🔍 Lookup**\n"
+            "> `!teaminfo <name>` (`!ti`) — Search team by name\n"
+            "> `!whois @user` (`!wi`) — Find a player's team\n\n"
+            "**✏️ Edit**\n"
+            "> `!update_team @user <NewName>` (`!ut`) — Rename team\n"
+            "> `!swap_slot MATCH_X <s1> <s2>` (`!ss`) — Swap two slots\n"
+            "> `!move_team @user <FROM> <TO>` (`!mtm`) — Transfer team\n\n"
+            "**📋 Export**\n"
+            "> `!export` (`!ex`) — Export all team data\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            "💡 *All lookup commands support team names and @mentions.*",
+            Theme.ACCENT,
+            "📖 Page 8/8 • Data & Lookup"
         )
+        return embed
 
-class HelpView(discord.ui.View):
+class HelpQuickButtons(discord.ui.View):
+    """Quick action buttons shown below the help menu."""
     def __init__(self, is_admin):
         super().__init__(timeout=120)
+        self.is_admin = is_admin
         self.add_item(HelpDropdown(is_admin))
+
+    @discord.ui.button(label="📊 Status", style=discord.ButtonStyle.secondary, row=2)
+    async def quick_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+            return
+        reg_status = "🟢 OPEN" if REGISTRATION_OPEN else "🔴 CLOSED"
+        total_teams = len(data["teams"])
+        total_booked = sum(len(v) for v in data["slots"].values())
+        total_cap = MAX_SLOTS * len(SLOT_LIST_CHANNELS)
+        paid = sum(1 for t in data["teams"].values() if t.get("paid"))
+        embed = make_embed(
+            "📊 Quick Status",
+            f"{Theme.SEP}\n\n"
+            f"**Registration:** {reg_status}\n"
+            f"**Teams:** `{total_teams}` ({paid} paid)\n"
+            f"**Slots:** `{total_booked}/{total_cap}` {Theme.bar(total_booked, total_cap)}\n\n"
+            f"{Theme.SEP}",
+            Theme.PREMIUM
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🏷️ My Team", style=discord.ButtonStyle.secondary, row=2)
+    async def quick_myteam(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+        if uid not in data["teams"]:
+            await interaction.response.send_message(
+                embed=make_embed("❌ No Team", "You haven't registered yet.", Theme.ERROR),
+                ephemeral=True
+            )
+            return
+        info = data["teams"][uid]
+        players = info.get("players", [])
+        booked = info.get("booked_slots", [])
+        paid_status = "✅ Paid" if info.get("paid") else "❌ Pending"
+        roster = ", ".join(players) or "None"
+        matches = ", ".join([s.replace('_', ' ') for s in booked]) if booked else "None"
+        embed = make_embed(
+            f"🏷️ {info['team']}",
+            f"**Players:** {roster}\n**Payment:** {paid_status}\n**Matches:** {matches}",
+            Theme.TEAL
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="💰 Pending", style=discord.ButtonStyle.secondary, row=2)
+    async def quick_pending(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+            return
+        pending_teams = [(uid, info) for uid, info in data["teams"].items() if not info.get("paid")]
+        if not pending_teams:
+            await interaction.response.send_message(
+                embed=make_embed("✅ All Clear", "No pending payments!", Theme.SUCCESS),
+                ephemeral=True
+            )
+            return
+        lines = [f"• **{info.get('team', '?')}** — <@{uid}>" for uid, info in pending_teams[:15]]
+        desc = "\n".join(lines)
+        if len(pending_teams) > 15:
+            desc += f"\n*...and {len(pending_teams) - 15} more. Use `!pending` for full list.*"
+        embed = make_embed(f"💰 Pending Payments ({len(pending_teams)})", desc, Theme.GOLD)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.command()
 async def help(ctx):
-    """Interactive help menu with dropdown categories."""
+    """Interactive help menu with dropdown categories and quick actions."""
     is_admin = ctx.author.guild_permissions.administrator
-    embed = HelpDropdown(is_admin)._overview()
-    await ctx.send(embed=embed, view=HelpView(is_admin), delete_after=120)
+    dropdown = HelpDropdown(is_admin)
+    embed = dropdown._overview()
+    await ctx.send(embed=embed, view=HelpQuickButtons(is_admin), delete_after=180)
 
 # ═══════════════════ 14. ERROR HANDLER ═══════════════════
 @bot.event
