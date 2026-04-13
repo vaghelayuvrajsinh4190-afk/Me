@@ -443,8 +443,8 @@ async def daily_reset_task():
 
 # ═══════════════════ 7. VERIFICATION SYSTEM (CONSENT) ═══════════════════
 class ConsentView(ui.View):
-    """Public consent view — teammates must click Accept before roles are granted."""
-    def __init__(self, team_name, leader, teammates):
+    """Ephemeral consent view — only tagged players can see it. Teammates must click Accept before roles are granted."""
+    def __init__(self, team_name, leader, teammates, channel):
         timeout_minutes = data.get("verify_timeout_minutes", 5)
         super().__init__(timeout=timeout_minutes * 60)
         self.team_name = team_name
@@ -452,7 +452,8 @@ class ConsentView(ui.View):
         self.teammates = teammates
         self.accepted = {leader.id}
         self.all_ids = {m.id for m in teammates}
-        self.message = None
+        self.channel = channel  # The channel where verification was initiated
+        self.dm_messages = {}   # Track DM messages sent to each teammate {user_id: message}
         self.completed = False
 
     def _build_embed(self):
@@ -491,7 +492,10 @@ class ConsentView(ui.View):
         if len(self.accepted) >= len(self.all_ids):
             await self._complete_verification(interaction)
         else:
+            # Update the DM message the user clicked on
             await interaction.response.edit_message(embed=self._build_embed(), view=self)
+            # Also update all other DM messages for other teammates
+            await self._update_all_dm_messages(exclude_user=interaction.user.id)
 
     @ui.button(label="🛠️ Admin Force Verify", style=discord.ButtonStyle.danger)
     async def admin_force_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -501,9 +505,20 @@ class ConsentView(ui.View):
         self.accepted = set(self.all_ids)
         await self._complete_verification(interaction)
 
+    async def _update_all_dm_messages(self, exclude_user=None):
+        """Update all DM messages to reflect current consent status."""
+        embed = self._build_embed()
+        for uid, msg in self.dm_messages.items():
+            if uid == exclude_user:
+                continue
+            try:
+                await msg.edit(embed=embed, view=self)
+            except Exception:
+                pass
+
     async def _complete_verification(self, interaction: discord.Interaction):
         self.completed = True
-        guild = interaction.guild
+        guild = self.channel.guild if self.channel else interaction.guild
         role = await get_or_create_role(guild, VERIFY_ROLE_NAME)
 
         member_details = []
@@ -542,7 +557,18 @@ class ConsentView(ui.View):
         for item in self.children:
             item.disabled = True
         self.stop()
+        
+        # Update the message the interaction came from
         await interaction.response.edit_message(embed=complete_embed, view=self)
+        
+        # Update all other DM messages
+        for uid, msg in self.dm_messages.items():
+            if uid == interaction.user.id:
+                continue
+            try:
+                await msg.edit(embed=complete_embed, view=self)
+            except Exception:
+                pass
 
     async def on_timeout(self):
         if self.completed:
@@ -558,9 +584,10 @@ class ConsentView(ui.View):
         )
         for item in self.children:
             item.disabled = True
-        if self.message:
+        # Update all DM messages on timeout
+        for uid, msg in self.dm_messages.items():
             try:
-                await self.message.edit(embed=expired_embed, view=self)
+                await msg.edit(embed=expired_embed, view=self)
             except Exception:
                 pass
 
@@ -612,18 +639,51 @@ class PlayerSelect(ui.UserSelect):
             await interaction.response.send_message(embed=e, ephemeral=True)
             return
 
-        # All checks passed — send public consent message
-        teammates_to_tag = [m for m in members if m.id != interaction.user.id]
-        mentions = " ".join([m.mention for m in teammates_to_tag])
+        # All checks passed — send ephemeral DMs to each tagged player
+        consent_view = ConsentView(self.team_name, interaction.user, list(members), interaction.channel)
 
-        consent_view = ConsentView(self.team_name, interaction.user, list(members))
-
-        await interaction.response.send_message(
-            content=f"🛡️ **{interaction.user.display_name}** is requesting team verification!\n{mentions} — please accept below.",
-            embed=consent_view._build_embed(),
-            view=consent_view
+        # Acknowledge the interaction — leader sees confirmation
+        leader_embed = make_embed(
+            f"🛡️ Verification Sent — {self.team_name}",
+            f"{Theme.SEP}\n\n"
+            f"Verification requests have been **DM'd** to your teammates.\n\n"
+            f"**Waiting for acceptance from all squad members...**\n\n"
+            f"{Theme.SEP}",
+            Theme.ACCENT,
+            f"Leader: {interaction.user.display_name}"
         )
-        consent_view.message = await interaction.original_response()
+        # Send the leader their own DM with the consent view
+        try:
+            leader_dm = await interaction.user.send(
+                content=f"🛡️ **Team Verification — {self.team_name}**\nYou initiated this verification. Your acceptance is auto-confirmed.",
+                embed=consent_view._build_embed(),
+                view=consent_view
+            )
+            consent_view.dm_messages[interaction.user.id] = leader_dm
+        except discord.Forbidden:
+            pass
+
+        # DM each teammate (excluding leader) with the shared consent view
+        dm_failed = []
+        for m in members:
+            if m.id == interaction.user.id:
+                continue
+            try:
+                dm_msg = await m.send(
+                    content=f"🛡️ **{interaction.user.display_name}** is requesting you to verify for team **{self.team_name}**!\nClick the button below to accept.",
+                    embed=consent_view._build_embed(),
+                    view=consent_view
+                )
+                consent_view.dm_messages[m.id] = dm_msg
+            except discord.Forbidden:
+                dm_failed.append(m.mention)
+
+        # Show leader a summary in-channel (ephemeral)
+        if dm_failed:
+            failed_list = ", ".join(dm_failed)
+            leader_embed.description += f"\n\n⚠️ **Could not DM:** {failed_list}\n*They may have DMs disabled.*"
+
+        await interaction.response.send_message(embed=leader_embed, ephemeral=True)
 
 class PlayerSelectView(ui.View):
     def __init__(self, team_name):
@@ -2040,6 +2100,157 @@ async def export_data(ctx):
     else:
         await ctx.send(output)
 
+# ═══════════════════ 12B. ADMIN DM BROADCAST ═══════════════════
+@bot.command(name="dm")
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def dm_broadcast(ctx, members: commands.Greedy[discord.Member], *, message: str):
+    """DM a message to one or more members. Usage: !dm @user1 @user2 message: your text here"""
+    if not members:
+        e = make_embed(
+            "⚠️ No Members Specified",
+            f"**Usage:** `!dm @member1 @member2 message: your text`\n\n"
+            f"You must mention at least one member before the message.",
+            Theme.WARNING
+        )
+        await ctx.send(embed=e)
+        return
+
+    # Strip leading "message:" prefix if present (optional convenience)
+    actual_message = message
+    if actual_message.lower().startswith("message:"):
+        actual_message = actual_message[len("message:"):].strip()
+
+    if not actual_message:
+        await ctx.send(embed=make_embed("⚠️ Empty Message", "You must provide a message to send.", Theme.WARNING))
+        return
+
+    # Send DMs
+    success = []
+    failed = []
+    for member in members:
+        try:
+            dm_embed = make_embed(
+                "📩 Message from Admin",
+                f"{Theme.SEP}\n\n"
+                f"{actual_message}\n\n"
+                f"{Theme.SEP}",
+                Theme.PREMIUM,
+                f"Sent by {ctx.author.display_name}"
+            )
+            await member.send(embed=dm_embed)
+            success.append(member.mention)
+        except discord.Forbidden:
+            failed.append(member.mention)
+        except Exception:
+            failed.append(member.mention)
+
+    # Build confirmation embed
+    desc = f"{Theme.SEP}\n\n"
+    desc += f"**📝 Message:**\n> {actual_message}\n\n"
+    desc += f"{Theme.THIN_SEP}\n\n"
+    if success:
+        desc += f"**✅ Delivered ({len(success)}):**\n" + ", ".join(success) + "\n\n"
+    if failed:
+        desc += f"**❌ Failed ({len(failed)}):**\n" + ", ".join(failed) + "\n*These members may have DMs disabled.*\n\n"
+    desc += f"{Theme.SEP}"
+
+    color = Theme.SUCCESS if not failed else (Theme.WARNING if success else Theme.ERROR)
+    confirm_embed = make_embed(
+        f"📨 DM Broadcast — {len(success)}/{len(members)} Delivered",
+        desc,
+        color
+    )
+    await ctx.send(embed=confirm_embed)
+
+@bot.command(name="dmall", aliases=["dma"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def dm_all(ctx, *, message: str):
+    """DM a message to ALL server members. Usage: !dmall your message here"""
+    # Strip leading "message:" prefix if present (optional convenience)
+    actual_message = message
+    if actual_message.lower().startswith("message:"):
+        actual_message = actual_message[len("message:"):].strip()
+
+    if not actual_message:
+        await ctx.send(embed=make_embed("⚠️ Empty Message", "You must provide a message to send.", Theme.WARNING))
+        return
+
+    # Filter out bots
+    members = [m for m in ctx.guild.members if not m.bot]
+    total = len(members)
+
+    if total == 0:
+        await ctx.send(embed=make_embed("⚠️ No Members", "No human members found in this server.", Theme.WARNING))
+        return
+
+    # Show progress embed
+    progress_embed = make_embed(
+        "📨 DM Broadcast — Sending...",
+        f"{Theme.SEP}\n\n"
+        f"**📝 Message:**\n> {actual_message}\n\n"
+        f"{Theme.THIN_SEP}\n\n"
+        f"⏳ Sending to **{total}** members...\n"
+        f"{Theme.bar(0, total, 16)}\n\n"
+        f"{Theme.SEP}",
+        Theme.PREMIUM
+    )
+    progress_msg = await ctx.send(embed=progress_embed)
+
+    success = 0
+    failed = 0
+    for i, member in enumerate(members, 1):
+        try:
+            dm_embed = make_embed(
+                "📩 Message from Admin",
+                f"{Theme.SEP}\n\n"
+                f"{actual_message}\n\n"
+                f"{Theme.SEP}",
+                Theme.PREMIUM,
+                f"Sent by {ctx.author.display_name}"
+            )
+            await member.send(embed=dm_embed)
+            success += 1
+        except Exception:
+            failed += 1
+
+        # Update progress every 10 members or on last member
+        if i % 10 == 0 or i == total:
+            pct = int((i / total) * 100)
+            try:
+                update_embed = make_embed(
+                    "📨 DM Broadcast — Sending...",
+                    f"{Theme.SEP}\n\n"
+                    f"**📝 Message:**\n> {actual_message}\n\n"
+                    f"{Theme.THIN_SEP}\n\n"
+                    f"⏳ Progress: **{i}/{total}** ({pct}%)\n"
+                    f"{Theme.bar(i, total, 16)}\n"
+                    f"✅ {success} delivered  •  ❌ {failed} failed\n\n"
+                    f"{Theme.SEP}",
+                    Theme.PREMIUM
+                )
+                await progress_msg.edit(embed=update_embed)
+            except Exception:
+                pass
+
+    # Final confirmation
+    desc = f"{Theme.SEP}\n\n"
+    desc += f"**📝 Message:**\n> {actual_message}\n\n"
+    desc += f"{Theme.THIN_SEP}\n\n"
+    desc += f"**✅ Delivered:** `{success}`\n"
+    desc += f"**❌ Failed:** `{failed}`\n"
+    desc += f"**👥 Total Members:** `{total}`\n\n"
+    desc += f"{Theme.SEP}"
+
+    color = Theme.SUCCESS if failed == 0 else (Theme.WARNING if success > 0 else Theme.ERROR)
+    final_embed = make_embed(
+        f"📨 DM Broadcast Complete — {success}/{total} Delivered",
+        desc,
+        color
+    )
+    await progress_msg.edit(embed=final_embed)
+
 # ═══════════════════ 13. INTERACTIVE HELP MENU ═══════════════════
 bot.remove_command("help")
 
@@ -2054,6 +2265,7 @@ class HelpDropdown(discord.ui.Select):
                 discord.SelectOption(label="Payment Management", description="Approve, pending, UPI settings", emoji="💰", value="payment"),
                 discord.SelectOption(label="Announcements", description="Announce & schedule", emoji="📢", value="announce"),
                 discord.SelectOption(label="Match Management", description="Setup, lock, notify", emoji="🔧", value="match"),
+                discord.SelectOption(label="DM Broadcast", description="DM specific or all members", emoji="📩", value="dm"),
                 discord.SelectOption(label="Data & Lookup", description="Stats, search, export", emoji="📊", value="data"),
             ])
         super().__init__(placeholder="📖 Select a category...", min_values=1, max_values=1, options=options)
@@ -2065,6 +2277,7 @@ class HelpDropdown(discord.ui.Select):
             "payment": self._payment,
             "announce": self._announce,
             "match": self._match,
+            "dm": self._dm,
             "data": self._data,
         }
         embed = pages.get(self.values[0], self._overview)()
@@ -2143,6 +2356,23 @@ class HelpDropdown(discord.ui.Select):
             "**`!unverify @user`** — Remove verified role\n"
             "**`!clear [count]`** — Purge messages",
             Theme.ROSE
+        )
+
+    def _dm(self):
+        return make_embed(
+            "📩 DM Broadcast",
+            f"{Theme.SEP}\n\n"
+            "**`!dm @user1 @user2 message`** (`!dm`)\n"
+            "╰ Send a DM to specific mentioned members\n\n"
+            "**`!dmall message`** (`!dma`)\n"
+            "╰ Broadcast a DM to **all** server members\n\n"
+            f"{Theme.THIN_SEP}\n\n"
+            "**📝 Usage Examples:**\n"
+            "> `!dm @Player1 @Player2 Your match starts in 10 mins!`\n"
+            "> `!dmall Tournament starts tomorrow at 8 PM IST!`\n\n"
+            "💡 *The `message:` prefix is optional.*\n"
+            "💡 *Bot skips members with DMs disabled and reports failures.*",
+            Theme.PREMIUM
         )
 
     def _data(self):
