@@ -1,3 +1,4 @@
+python
 import discord
 from discord.ext import commands, tasks
 from discord import ui
@@ -771,9 +772,17 @@ class PaymentTicketView(discord.ui.View):
     @discord.ui.button(label="🎫 Open Payment Ticket", style=discord.ButtonStyle.success, custom_id="open_payment_ticket_btn")
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
+        
         if uid in data.get("open_tickets", {}):
-            await interaction.response.send_message("❌ You already have an open ticket.", ephemeral=True)
-            return
+            ticket_channel_id = data["open_tickets"][uid]
+            existing_channel = interaction.guild.get_channel(ticket_channel_id)
+            if existing_channel:
+                await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
+                return
+            else:
+                # Ticket was manually deleted, so we clean the database
+                del data["open_tickets"][uid]
+                save_data(data)
         
         if uid not in data.get("teams", {}):
             await interaction.response.send_message("❌ You are not registered.", ephemeral=True)
@@ -946,6 +955,17 @@ class SlotButton(discord.ui.Button):
             team_name = data.get("teams", {}).get(uid, {}).get("team", "your team")
             await interaction.response.send_message(embed=make_payment_embed(team_name), view=PaymentTicketView(), ephemeral=True)
             return
+            
+        selected_part = data.get("teams", {}).get(uid, {}).get("selected_part", "part_1")
+        if selected_part == "part_2" and self.slot not in ["MATCH_5", "MATCH_6", "MATCH_7", "MATCH_8"]:
+            e = make_embed("⛔ Access Denied", "You only paid for Part 2. You cannot join Part 1 matches.", Theme.ERROR)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+        if selected_part == "part_1" and self.slot not in ["MATCH_1", "MATCH_2", "MATCH_3", "MATCH_4"]:
+            e = make_embed("⛔ Access Denied", "You only paid for Part 1. You cannot join Part 2 matches.", Theme.ERROR)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            return
+
         success = await add_player_to_slot(interaction, self.slot)
         if success:
             display = self.slot.replace('_', ' ')
@@ -962,10 +982,18 @@ class SlotButton(discord.ui.Button):
                  await interaction.response.send_message(embed=e, ephemeral=True)
 
 class SlotSelectView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, uid):
         super().__init__(timeout=60)
-        for s in SLOT_LIST_CHANNELS:
-            self.add_item(SlotButton(s))
+        selected_part = data.get("teams", {}).get(uid, {}).get("selected_part", "part_1")
+        
+        if selected_part == "part_2":
+            allowed_matches = ["MATCH_5", "MATCH_6", "MATCH_7", "MATCH_8"]
+        else:
+            allowed_matches = ["MATCH_1", "MATCH_2", "MATCH_3", "MATCH_4"]
+            
+        for s in allowed_matches:
+            if s in SLOT_LIST_CHANNELS:
+                self.add_item(SlotButton(s))
 
 class AutoClaimView(discord.ui.View):
     def __init__(self):
@@ -986,11 +1014,19 @@ class AutoClaimView(discord.ui.View):
             team_name = data["teams"][uid].get("team", "your team")
             await interaction.response.send_message(embed=make_payment_embed(team_name), view=PaymentTicketView(), ephemeral=True)
             return
+            
+        selected_part = data["teams"][uid].get("selected_part", "part_1")
+        if selected_part == "part_2":
+            allowed_matches = ["MATCH_5", "MATCH_6", "MATCH_7", "MATCH_8"]
+        else:
+            allowed_matches = ["MATCH_1", "MATCH_2", "MATCH_3", "MATCH_4"]
+
         assigned = None
-        for slot_name in SLOT_LIST_CHANNELS:
+        for slot_name in allowed_matches:
             if len(data["slots"][slot_name]) < MAX_SLOTS and uid not in data["slots"][slot_name]:
                 assigned = slot_name
                 break
+                
         if assigned:
             success = await add_player_to_slot(interaction, assigned)
             if success:
@@ -998,7 +1034,7 @@ class AutoClaimView(discord.ui.View):
                 e = make_embed("⚡ Auto-Assigned!", f"You've been placed in **{display}**!", Theme.SUCCESS)
                 await interaction.response.send_message(embed=e, ephemeral=True)
         else:
-            e = make_embed("❌ All Full", "Every match slot is currently taken. Try again later or cancel an existing slot.", Theme.ERROR)
+            e = make_embed("❌ All Full", "Every match slot in your selected part is currently taken.", Theme.ERROR)
             await interaction.response.send_message(embed=e, ephemeral=True)
 
 class TeamChoiceView(discord.ui.View):
@@ -1035,7 +1071,7 @@ class TeamChoiceView(discord.ui.View):
             f"Select a match below to claim your slot.",
             Theme.SUCCESS
         )
-        await interaction.response.send_message(embed=e, view=SlotSelectView(), ephemeral=True)
+        await interaction.response.send_message(embed=e, view=SlotSelectView(uid), ephemeral=True)
 
     @discord.ui.button(label="📝 Register New Team", style=discord.ButtonStyle.primary)
     async def update_new(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1128,7 +1164,7 @@ class CancelAndClaimView(discord.ui.View):
             await interaction.response.send_message(embed=make_payment_embed(team_name), view=PaymentTicketView(), ephemeral=True)
             return
         e = make_embed("🎮 Available Matches", "Select a match below to claim your slot.", Theme.ACCENT)
-        await interaction.response.send_message(embed=e, view=SlotSelectView(), ephemeral=True)
+        await interaction.response.send_message(embed=e, view=SlotSelectView(uid), ephemeral=True)
 
 # ================= 9. BOT CLASS & ADMIN COMMANDS =================
 class SlotBot(commands.Bot):
