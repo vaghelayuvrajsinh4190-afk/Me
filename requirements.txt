@@ -4,3 +4,7 @@ discord.py>=2.3.2
 # Web Server (for keep_alive functionality)
 Flask>=3.0.0
 waitress>=2.1.2
+
+# MongoDB Database Driver
+pymongo[srv]
+
