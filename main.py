@@ -122,7 +122,36 @@ def make_embed(title, desc=None, color=None, footer=None):
 # ================= 2. DATA HANDLING (MongoDB) =================
 
 MONGO_URI = os.environ.get("MONGO_URI")
-mongo_client = MongoClient(MONGO_URI)
+
+# --- Startup Validation ---
+if not TOKEN:
+    print("❌ FATAL: TOKEN environment variable is not set!")
+    print("   → Set it in Render Dashboard → Environment → Add Environment Variable")
+    exit(1)
+
+if not MONGO_URI:
+    print("❌ FATAL: MONGO_URI environment variable is not set!")
+    print("   → Set it in Render Dashboard → Environment → Add Environment Variable")
+    exit(1)
+
+if "<db_password>" in MONGO_URI:
+    print("❌ FATAL: MONGO_URI still contains '<db_password>' placeholder!")
+    print("   → Replace <db_password> with your actual MongoDB password")
+    exit(1)
+
+print("✅ TOKEN found")
+print("✅ MONGO_URI found")
+
+try:
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
+    # Force a connection attempt to verify credentials
+    mongo_client.admin.command("ping")
+    print("✅ MongoDB connection successful!")
+except Exception as e:
+    print(f"❌ FATAL: Could not connect to MongoDB: {e}")
+    print("   → Check your MONGO_URI and database password")
+    exit(1)
+
 mongo_db = mongo_client["tournament_db"]
 collection = mongo_db["tournament_data"]
 
