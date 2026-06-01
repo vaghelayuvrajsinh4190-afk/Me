@@ -975,7 +975,7 @@ class PartSelectionView(discord.ui.View):
         if not part1_open:
             p1_btn = discord.ui.Button(label=f"⛔ {part1_name} (CLOSED)", style=discord.ButtonStyle.secondary, disabled=True)
         elif "part_1" in paid_parts:
-            p1_btn = discord.ui.Button(label=f"✅ {part1_name} (Already Paid)", style=discord.ButtonStyle.success, disabled=True)
+            p1_btn = discord.ui.Button(label=f"✅ {part1_name} (Paid - Join Matches)", style=discord.ButtonStyle.success, disabled=False)
         else:
             p1_btn = discord.ui.Button(label=f"🅰️ {part1_name}", style=discord.ButtonStyle.primary)
         p1_btn.callback = self.part1_callback
@@ -985,23 +985,35 @@ class PartSelectionView(discord.ui.View):
         if not part2_open:
             p2_btn = discord.ui.Button(label=f"⛔ {part2_name} (CLOSED)", style=discord.ButtonStyle.secondary, disabled=True)
         elif "part_2" in paid_parts:
-            p2_btn = discord.ui.Button(label=f"✅ {part2_name} (Already Paid)", style=discord.ButtonStyle.success, disabled=True)
+            p2_btn = discord.ui.Button(label=f"✅ {part2_name} (Paid - Join Matches)", style=discord.ButtonStyle.success, disabled=False)
         else:
             p2_btn = discord.ui.Button(label=f"🅱️ {part2_name}", style=discord.ButtonStyle.primary)
         p2_btn.callback = self.part2_callback
         self.add_item(p2_btn)
 
     async def part1_callback(self, interaction: discord.Interaction):
+        paid_parts = data.get("teams", {}).get(self.uid, {}).get("paid_parts", [])
         if self.uid in data.get("teams", {}):
             data["teams"][self.uid]["selected_part"] = "part_1"
             save_data(data)
-        await interaction.response.edit_message(embed=make_payment_embed(self.team_name), view=PaymentTicketView())
+            
+        if "part_1" in paid_parts:
+            e = make_embed(f"🏷️ Using Team ─ {self.team_name}", f"{Theme.SEP}\n\nSelect a match below to claim your slot for Part 1.\n\n{Theme.SEP}", Theme.SUCCESS)
+            await interaction.response.edit_message(embed=e, view=SlotSelectView(self.uid, filter_part="part_1"))
+        else:
+            await interaction.response.edit_message(embed=make_payment_embed(self.team_name), view=PaymentTicketView())
 
     async def part2_callback(self, interaction: discord.Interaction):
+        paid_parts = data.get("teams", {}).get(self.uid, {}).get("paid_parts", [])
         if self.uid in data.get("teams", {}):
             data["teams"][self.uid]["selected_part"] = "part_2"
             save_data(data)
-        await interaction.response.edit_message(embed=make_payment_embed(self.team_name), view=PaymentTicketView())
+            
+        if "part_2" in paid_parts:
+            e = make_embed(f"🏷️ Using Team ─ {self.team_name}", f"{Theme.SEP}\n\nSelect a match below to claim your slot for Part 2.\n\n{Theme.SEP}", Theme.SUCCESS)
+            await interaction.response.edit_message(embed=e, view=SlotSelectView(self.uid, filter_part="part_2"))
+        else:
+            await interaction.response.edit_message(embed=make_payment_embed(self.team_name), view=PaymentTicketView())
 
 class SlotButton(discord.ui.Button):
     def __init__(self, slot):
@@ -1053,16 +1065,22 @@ class SlotButton(discord.ui.Button):
                 await interaction.response.send_message(embed=e, ephemeral=True)
 
 class SlotSelectView(discord.ui.View):
-    def __init__(self, uid):
+    def __init__(self, uid, filter_part=None):
         super().__init__(timeout=60)
         paid_parts = get_paid_parts(uid)
 
-        # Build allowed matches from ALL paid parts
+        # Build allowed matches from paid parts
         allowed_matches = []
-        if "part_1" in paid_parts:
-            allowed_matches += ["MATCH_1", "MATCH_2", "MATCH_3", "MATCH_4"]
-        if "part_2" in paid_parts:
-            allowed_matches += ["MATCH_5", "MATCH_6", "MATCH_7", "MATCH_8"]
+        if filter_part:
+            if filter_part == "part_1" and "part_1" in paid_parts:
+                allowed_matches += ["MATCH_1", "MATCH_2", "MATCH_3", "MATCH_4"]
+            elif filter_part == "part_2" and "part_2" in paid_parts:
+                allowed_matches += ["MATCH_5", "MATCH_6", "MATCH_7", "MATCH_8"]
+        else:
+            if "part_1" in paid_parts:
+                allowed_matches += ["MATCH_1", "MATCH_2", "MATCH_3", "MATCH_4"]
+            if "part_2" in paid_parts:
+                allowed_matches += ["MATCH_5", "MATCH_6", "MATCH_7", "MATCH_8"]
 
         for s in allowed_matches:
             if s in SLOT_LIST_CHANNELS:
@@ -1124,29 +1142,22 @@ class TeamChoiceView(discord.ui.View):
     @discord.ui.button(label="✅ Continue with this team", style=discord.ButtonStyle.success)
     async def continue_old(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
-        paid_parts = get_paid_parts(uid)
-
-        if not paid_parts:
-            # No paid parts — show part selection
-            part1_name = data.get("part_names", {}).get("1", "Part 1 - Matches 1 to 4")
-            part2_name = data.get("part_names", {}).get("2", "Part 2 - Matches 5 to 8")
-            e = make_embed(
-                "🎮 Select Your Part",
-                f"{Theme.SEP}\n\n**Choose which part you want to play:**\n\n"
-                f"╭── 🅰️ **{part1_name}**\n"
-                f"│  Matches 1, 2, 3, 4\n"
-                f"╰──────────────────────────\n\n"
-                f"╭── 🅱️ **{part2_name}**\n"
-                f"│  Matches 5, 6, 7, 8\n"
-                f"╰──────────────────────────\n\n{Theme.SEP}",
-                Theme.PREMIUM, "Select a part to continue"
-            )
-            await interaction.response.send_message(embed=e, view=PartSelectionView(uid, self.team_name), ephemeral=True)
-            return
-
-        # Has at least one paid part — show slot selection for all paid parts
-        e = make_embed(f"🏷️ Using Team ─ {self.team_name}", f"{Theme.SEP}\n\nSelect a match below to claim your slot.\n\n{Theme.SEP}", Theme.SUCCESS)
-        await interaction.response.send_message(embed=e, view=SlotSelectView(uid), ephemeral=True)
+        
+        part1_name = data.get("part_names", {}).get("1", "Part 1 - Matches 1 to 4")
+        part2_name = data.get("part_names", {}).get("2", "Part 2 - Matches 5 to 8")
+        
+        e = make_embed(
+            "🎮 Select Your Part",
+            f"{Theme.SEP}\n\n**Choose which part you want to play or pay for:**\n\n"
+            f"╭── 🅰️ **{part1_name}**\n"
+            f"│  Matches 1, 2, 3, 4\n"
+            f"╰──────────────────────────\n\n"
+            f"╭── 🅱️ **{part2_name}**\n"
+            f"│  Matches 5, 6, 7, 8\n"
+            f"╰──────────────────────────\n\n{Theme.SEP}",
+            Theme.PREMIUM, "Select a part to continue"
+        )
+        await interaction.response.send_message(embed=e, view=PartSelectionView(uid, self.team_name), ephemeral=True)
 
     @discord.ui.button(label="📝 Register New Team", style=discord.ButtonStyle.primary)
     async def update_new(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1241,16 +1252,22 @@ class CancelAndClaimView(discord.ui.View):
             await interaction.response.send_message(embed=e, ephemeral=True)
             return
 
-        paid_parts = get_paid_parts(uid)
-        if not paid_parts:
-            team_name = data["teams"][uid].get("team", "your team")
-            await interaction.response.send_message(
-                embed=make_payment_embed(team_name), view=PaymentTicketView(), ephemeral=True
-            )
-            return
-
-        e = make_embed("🎮 Available Matches", "Select a match below to claim your slot.", Theme.ACCENT)
-        await interaction.response.send_message(embed=e, view=SlotSelectView(uid), ephemeral=True)
+        team_name = data["teams"][uid].get("team", "your team")
+        part1_name = data.get("part_names", {}).get("1", "Part 1 - Matches 1 to 4")
+        part2_name = data.get("part_names", {}).get("2", "Part 2 - Matches 5 to 8")
+        
+        e = make_embed(
+            "🎮 Select Your Part",
+            f"{Theme.SEP}\n\n**Choose which part you want to play or pay for:**\n\n"
+            f"╭── 🅰️ **{part1_name}**\n"
+            f"│  Matches 1, 2, 3, 4\n"
+            f"╰──────────────────────────\n\n"
+            f"╭── 🅱️ **{part2_name}**\n"
+            f"│  Matches 5, 6, 7, 8\n"
+            f"╰──────────────────────────\n\n{Theme.SEP}",
+            Theme.PREMIUM, "Select a part to continue"
+        )
+        await interaction.response.send_message(embed=e, view=PartSelectionView(uid, team_name), ephemeral=True)
 
 # ═══════════════════ APPROVAL VIEW (Persistent) ═══════════════════
 
