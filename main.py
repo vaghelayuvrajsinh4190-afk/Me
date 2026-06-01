@@ -860,7 +860,7 @@ class PaymentTicketView(discord.ui.View):
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True)
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True, read_message_history=True)
         }
 
         try:
@@ -1528,7 +1528,11 @@ async def on_message(message):
 
     # Screenshot detection in ticket channels → forward to admin approval channel
     if message.channel.name and str(message.channel.name).startswith("ticket-") and message.attachments:
-        image_attachments = [a for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+        image_attachments = [
+            a for a in message.attachments 
+            if (a.content_type and a.content_type.startswith("image/")) or 
+               (a.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')))
+        ]
         if image_attachments:
             # Find which team this ticket belongs to
             uid = None
@@ -1549,6 +1553,12 @@ async def on_message(message):
                 part_label = data.get("part_names", {}).get(part_num, f"Part {part_num}")
 
                 admin_channel = message.guild.get_channel(ADMIN_CHANNEL_ID)
+                if not admin_channel:
+                    try:
+                        admin_channel = await message.guild.fetch_channel(ADMIN_CHANNEL_ID)
+                    except Exception:
+                        admin_channel = None
+
                 if admin_channel:
                     approval_embed = make_embed(
                         "💳 Payment Approval Request",
@@ -1560,13 +1570,26 @@ async def on_message(message):
                     )
                     approval_embed.set_image(url=image_attachments[0].url)
 
-                    await admin_channel.send(embed=approval_embed, view=PersistentApprovalView())
-
-                    # Confirm in ticket
-                    confirm_e = make_embed("📤 Screenshot Forwarded",
-                        "Your payment screenshot has been sent to admins for review.\n"
-                        "Please wait for approval.", Theme.INFO)
-                    await message.channel.send(embed=confirm_e)
+                    try:
+                        await admin_channel.send(embed=approval_embed, view=PersistentApprovalView())
+                        
+                        # Confirm in ticket
+                        confirm_e = make_embed("📤 Screenshot Forwarded",
+                            "Your payment screenshot has been sent to admins for review.\n"
+                            "Please wait for approval.", Theme.INFO)
+                        await message.channel.send(embed=confirm_e)
+                    except discord.Forbidden:
+                        err_e = make_embed("❌ Error Forwarding",
+                            "I do not have permission to send messages in the admin approval channel. Please contact an admin.", Theme.ERROR)
+                        await message.channel.send(embed=err_e)
+                    except Exception as err:
+                        err_e = make_embed("❌ Error Forwarding",
+                            f"An error occurred: `{err}`", Theme.ERROR)
+                        await message.channel.send(embed=err_e)
+                else:
+                    err_e = make_embed("❌ Admin Channel Not Found",
+                        f"Could not find the admin channel (`{ADMIN_CHANNEL_ID}`). Please ask an admin to check the setup.", Theme.ERROR)
+                    await message.channel.send(embed=err_e)
 
     await bot.process_commands(message)
 
