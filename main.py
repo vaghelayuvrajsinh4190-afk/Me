@@ -179,7 +179,9 @@ def load_data():
                 }
             },
             "match_results": {},
-            "last_reset_date": ""
+            "last_reset_date": "",
+            "verify_channel_id": None,
+            "verify_message_id": None
         }
         collection.insert_one(default_data)
         return default_data
@@ -196,6 +198,8 @@ def load_data():
         ("open_tickets", {}),
         ("match_results", {}),
         ("last_reset_date", ""),
+        ("verify_channel_id", None),
+        ("verify_message_id", None),
     ]:
         if key not in data:
             data[key] = default
@@ -1479,6 +1483,39 @@ class SlotBot(commands.Bot):
 
 bot = SlotBot()
 
+async def validate_verification_panel():
+    verify_chan_id = data.get("verify_channel_id")
+    verify_msg_id = data.get("verify_message_id")
+    if not verify_chan_id or not verify_msg_id:
+        print("[INFO] No verification panel stored in database.", flush=True)
+        return False
+
+    print(f"[INFO] Validating stored verification panel (Channel: {verify_chan_id}, Message: {verify_msg_id})...", flush=True)
+    try:
+        channel = bot.get_channel(verify_chan_id)
+        if not channel:
+            channel = await bot.fetch_channel(verify_chan_id)
+        if not channel:
+            print(f"[ERROR] Stored verification channel {verify_chan_id} not found.", flush=True)
+            return False
+
+        try:
+            await channel.fetch_message(verify_msg_id)
+            print("[INFO] Stored verification panel is valid and active.", flush=True)
+            return True
+        except discord.NotFound:
+            print(f"[WARNING] Stored verification message {verify_msg_id} was deleted/not found. Clearing references.", flush=True)
+            data["verify_channel_id"] = None
+            data["verify_message_id"] = None
+            save_data(data)
+            return False
+        except discord.Forbidden:
+            print(f"[ERROR] Permission denied when fetching verification message {verify_msg_id} in channel {verify_chan_id}.", flush=True)
+            return False
+    except Exception as e:
+        print(f"[ERROR] Unexpected error during verification panel validation: {e}", flush=True)
+        return False
+
 def is_admin_channel():
     async def predicate(ctx):
         if ctx.channel.id != ADMIN_COMMAND_CHANNEL_ID:
@@ -1510,6 +1547,9 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     if not daily_reset_task.is_running():
         daily_reset_task.start()
+
+    # Validate stored verification panel
+    await validate_verification_panel()
 
     # ── Crash Catch-Up: check if we missed midnight reset ──
     utc_now = datetime.datetime.utcnow()
@@ -1628,9 +1668,37 @@ async def clear(ctx, amount: int = 100):
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
 async def setup_verify(ctx):
+    # 1. Explicit administrator check
+    if not isinstance(ctx.author, discord.Member) or not ctx.author.guild_permissions.administrator:
+        e = make_embed("🔒 Access Denied", "You don’t have permission to use this command.", Theme.ERROR)
+        await ctx.send(embed=e, delete_after=10)
+        return
+
+    # 2. Prevent duplicate panels by validating if one already exists
+    if await validate_verification_panel():
+        verify_chan_id = data.get("verify_channel_id")
+        verify_msg_id = data.get("verify_message_id")
+        channel_mention = f"<#{verify_chan_id}>" if verify_chan_id else "another channel"
+        print(f"[INFO] setup_verify aborted. Panel already active in channel {verify_chan_id}, message {verify_msg_id}.", flush=True)
+        e = make_embed(
+            "⚠️ Panel Already Active",
+            f"{Theme.SEP}\n\nA verification panel already exists and is active in {channel_mention}.\n"
+            f"Message ID: `{verify_msg_id}`\n\n"
+            f"If you wish to relocate it, please delete the old message/channel first.\n\n"
+            f"{Theme.SEP}",
+            Theme.WARNING
+        )
+        await ctx.send(embed=e, delete_after=15)
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        return
+
     if ctx.channel.id != VERIFY_CHANNEL_ID:
         e = make_embed("⚠️ Channel Mismatch", f"Expected <#{VERIFY_CHANNEL_ID}>, posting here anyway.", Theme.WARNING)
         await ctx.send(embed=e, delete_after=5)
+
     embed = make_embed(
         "🛡️ Squad Verification Portal",
         f"{Theme.SEP}\n\n**Welcome, warriors!** ⚔️\n\n"
@@ -1643,8 +1711,23 @@ async def setup_verify(ctx):
         f"{Theme.SEP}",
         Theme.ACCENT, "🔐 One-time verification per squad"
     )
-    await ctx.send(embed=embed, view=PersistentVerifyView())
-    await ctx.message.delete()
+
+    try:
+        panel_message = await ctx.send(embed=embed, view=PersistentVerifyView())
+        # Store in database
+        data["verify_channel_id"] = panel_message.channel.id
+        data["verify_message_id"] = panel_message.id
+        save_data(data)
+        print(f"[INFO] Verification panel successfully created. Channel: {panel_message.channel.id}, Message: {panel_message.id}", flush=True)
+    except Exception as err:
+        print(f"[ERROR] Failed to send verification panel: {err}", flush=True)
+        e = make_embed("❌ Setup Failed", f"Could not create verification panel: `{err}`", Theme.ERROR)
+        await ctx.send(embed=e, delete_after=10)
+
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
 
 @bot.command(aliases=["fr", "rm"])
 @commands.has_permissions(administrator=True)
