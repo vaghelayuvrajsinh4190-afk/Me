@@ -1695,9 +1695,23 @@ async def setup_verify(ctx):
             pass
         return
 
-    if ctx.channel.id != VERIFY_CHANNEL_ID:
-        e = make_embed("⚠️ Channel Mismatch", f"Expected <#{VERIFY_CHANNEL_ID}>, posting here anyway.", Theme.WARNING)
-        await ctx.send(embed=e, delete_after=5)
+    # Get the verification channel
+    verify_ch = ctx.guild.get_channel(VERIFY_CHANNEL_ID)
+    if not verify_ch:
+        try:
+            verify_ch = await ctx.guild.fetch_channel(VERIFY_CHANNEL_ID)
+        except Exception:
+            pass
+
+    if not verify_ch:
+        print(f"[ERROR] Verification channel with ID {VERIFY_CHANNEL_ID} not found.", flush=True)
+        e = make_embed("❌ Channel Not Found", f"Could not find the verification channel (<#{VERIFY_CHANNEL_ID}>). Please check your configuration.", Theme.ERROR)
+        await ctx.send(embed=e, delete_after=10)
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        return
 
     embed = make_embed(
         "🛡️ Squad Verification Portal",
@@ -1713,14 +1727,22 @@ async def setup_verify(ctx):
     )
 
     try:
-        panel_message = await ctx.send(embed=embed, view=PersistentVerifyView())
+        panel_message = await verify_ch.send(embed=embed, view=PersistentVerifyView())
         # Store in database
         data["verify_channel_id"] = panel_message.channel.id
         data["verify_message_id"] = panel_message.id
         save_data(data)
         print(f"[INFO] Verification panel successfully created. Channel: {panel_message.channel.id}, Message: {panel_message.id}", flush=True)
+        
+        # Notify the admin in the command channel
+        e_success = make_embed(
+            "✅ Portal Setup Complete",
+            f"The verification panel has been successfully posted in {verify_ch.mention}.",
+            Theme.SUCCESS
+        )
+        await ctx.send(embed=e_success, delete_after=10)
     except Exception as err:
-        print(f"[ERROR] Failed to send verification panel: {err}", flush=True)
+        print(f"[ERROR] Failed to send verification panel to verification channel: {err}", flush=True)
         e = make_embed("❌ Setup Failed", f"Could not create verification panel: `{err}`", Theme.ERROR)
         await ctx.send(embed=e, delete_after=10)
 
