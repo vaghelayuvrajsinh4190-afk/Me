@@ -251,6 +251,7 @@ def save_data(data_to_save):
     collection.replace_one({"_id": "main_data"}, data_to_save, upsert=True)
 
 data = load_data()
+active_verifications = {}
 
 def get_upi_settings():
     return data.get("upi_settings", DEFAULT_UPI_SETTINGS)
@@ -547,6 +548,8 @@ class ConsentView(ui.View):
         self.channel = channel
         self.dm_messages = {}
         self.completed = False
+        # Register in active_verifications
+        active_verifications[team_name.upper()] = self
 
     def _build_embed(self):
         accepted_count = len(self.accepted)
@@ -606,8 +609,11 @@ class ConsentView(ui.View):
             except Exception:
                 pass
 
-    async def _complete_verification(self, interaction: discord.Interaction):
+    async def _complete_verification(self, interaction):
         self.completed = True
+        # Remove from active_verifications
+        active_verifications.pop(self.team_name.upper(), None)
+
         guild = self.channel.guild if self.channel else interaction.guild
         role = await get_or_create_role(guild, VERIFY_ROLE_NAME)
 
@@ -645,9 +651,19 @@ class ConsentView(ui.View):
         for item in self.children:
             item.disabled = True
         self.stop()
-        await interaction.response.edit_message(embed=complete_embed, view=self)
+
+        is_interaction = isinstance(interaction, discord.Interaction)
+        if is_interaction:
+            await interaction.response.edit_message(embed=complete_embed, view=self)
+        else:
+            try:
+                await interaction.send(embed=complete_embed)
+            except Exception:
+                pass
+
+        author_id = interaction.user.id if is_interaction else interaction.author.id
         for uid, msg in self.dm_messages.items():
-            if uid == interaction.user.id:
+            if uid == author_id:
                 continue
             try:
                 await msg.edit(embed=complete_embed, view=self)
@@ -657,6 +673,9 @@ class ConsentView(ui.View):
     async def on_timeout(self):
         if self.completed:
             return
+        # Remove from active_verifications
+        active_verifications.pop(self.team_name.upper(), None)
+
         expired_embed = make_embed(
             f"⌛ Verification Expired ─ {self.team_name}",
             f"{Theme.SEP}\n\n❌ **Time ran out!**\n\n"
@@ -2528,6 +2547,129 @@ async def unverify(ctx, member: discord.Member):
     except discord.Forbidden:
         await ctx.send(embed=make_embed("❌ Error", "Missing permissions to remove the verified role.", Theme.ERROR))
 
+@bot.command(aliases=["fv"])
+@commands.has_permissions(administrator=True)
+@is_admin_channel()
+async def forceverify(ctx, *, target: str):
+    """
+    Force verify a pending squad (by team name) or a user (by mention/ID).
+    Usage:
+      !forceverify TEAMNAME
+      !forceverify @user
+      !forceverify <user_id>
+    """
+    target = target.strip()
+    member = None
+
+    # Try resolving as mention or ID
+    if target.startswith("<@") and target.endswith(">"):
+        try:
+            uid_str = target.replace("<@", "").replace(">", "").replace("!", "")
+            member = ctx.guild.get_member(int(uid_str)) or await ctx.guild.fetch_member(int(uid_str))
+        except Exception:
+            pass
+    elif target.isdigit():
+        try:
+            member = ctx.guild.get_member(int(target)) or await ctx.guild.fetch_member(int(target))
+        except Exception:
+            pass
+
+    # 1. If we found a member, check if they are part of any active verifications
+    if member:
+        pending_verification = None
+        for verification in list(active_verifications.values()):
+            member_ids = {m.id for m in verification.teammates}
+            if member.id in member_ids:
+                pending_verification = verification
+                break
+
+        if pending_verification:
+            # Force-verify the whole squad
+            pending_verification.accepted = set(pending_verification.all_ids)
+            await pending_verification._complete_verification(ctx)
+            print(f"[INFO] Admin force-verified squad '{pending_verification.team_name}' via member {member.name}.", flush=True)
+            e = make_embed("✅ Force Verified", f"Successfully force-verified team **{pending_verification.team_name}** because {member.mention} is a member.", Theme.SUCCESS)
+            await ctx.send(embed=e)
+            return
+        else:
+            # Grant verified role directly
+            role = discord.utils.get(ctx.guild.roles, name=VERIFY_ROLE_NAME)
+            if not role:
+                role = await get_or_create_role(ctx.guild, VERIFY_ROLE_NAME)
+            if role:
+                try:
+                    await member.add_roles(role)
+                    print(f"[INFO] Admin force-verified user {member.name} directly.", flush=True)
+                    e = make_embed("✅ Force Verified", f"Successfully granted **{VERIFY_ROLE_NAME}** role to {member.mention}.", Theme.SUCCESS)
+                    await ctx.send(embed=e)
+                except discord.Forbidden:
+                    e = make_embed("❌ Permission Error", "I do not have permission to add the role to this member. Check my role hierarchy.", Theme.ERROR)
+                    await ctx.send(embed=e)
+            else:
+                e = make_embed("❌ Role Error", f"Could not find or create role `{VERIFY_ROLE_NAME}`.", Theme.ERROR)
+                await ctx.send(embed=e)
+            return
+
+    # 2. If it's a team name, check exact match first
+    verification = active_verifications.get(target.upper())
+    if verification:
+        verification.accepted = set(verification.all_ids)
+        await verification._complete_verification(ctx)
+        print(f"[INFO] Admin force-verified squad '{verification.team_name}' by name.", flush=True)
+        e = make_embed("✅ Force Verified", f"Successfully force-verified team **{verification.team_name}**.", Theme.SUCCESS)
+        await ctx.send(embed=e)
+        return
+
+    # 3. Check partial case-insensitive match for team name
+    for key, verification in list(active_verifications.items()):
+        if target.upper() in key:
+            verification.accepted = set(verification.all_ids)
+            await verification._complete_verification(ctx)
+            print(f"[INFO] Admin force-verified squad '{verification.team_name}' by partial name match '{target}'.", flush=True)
+            e = make_embed("✅ Force Verified", f"Successfully force-verified team **{verification.team_name}** (matched '{target}').", Theme.SUCCESS)
+            await ctx.send(embed=e)
+            return
+
+    # 4. Try searching members by username (in case they typed username instead of mention/ID)
+    try:
+        found_member = discord.utils.get(ctx.guild.members, name=target) or discord.utils.get(ctx.guild.members, display_name=target)
+        if not found_member:
+            async for m in ctx.guild.fetch_members(limit=100):
+                if m.name.lower() == target.lower() or m.display_name.lower() == target.lower():
+                    found_member = m
+                    break
+        if found_member:
+            pending_verification = None
+            for verification in list(active_verifications.values()):
+                member_ids = {m.id for m in verification.teammates}
+                if found_member.id in member_ids:
+                    pending_verification = verification
+                    break
+
+            if pending_verification:
+                pending_verification.accepted = set(pending_verification.all_ids)
+                await pending_verification._complete_verification(ctx)
+                print(f"[INFO] Admin force-verified squad '{pending_verification.team_name}' via member {found_member.name}.", flush=True)
+                e = make_embed("✅ Force Verified", f"Successfully force-verified team **{pending_verification.team_name}** because {found_member.mention} is a member.", Theme.SUCCESS)
+                await ctx.send(embed=e)
+                return
+            else:
+                role = discord.utils.get(ctx.guild.roles, name=VERIFY_ROLE_NAME)
+                if not role:
+                    role = await get_or_create_role(ctx.guild, VERIFY_ROLE_NAME)
+                if role:
+                    await found_member.add_roles(role)
+                    print(f"[INFO] Admin force-verified user {found_member.name} directly via username.", flush=True)
+                    e = make_embed("✅ Force Verified", f"Successfully granted **{VERIFY_ROLE_NAME}** role to {found_member.mention}.", Theme.SUCCESS)
+                    await ctx.send(embed=e)
+                return
+    except Exception as e:
+        print(f"[WARNING] Username lookup failed for '{target}': {e}", flush=True)
+
+    # 5. Not found
+    e = make_embed("❌ Verification Not Found", f"Could not find a pending team or server member matching **'{target}'**.", Theme.ERROR)
+    await ctx.send(embed=e)
+
 @bot.command(aliases=["s"])
 @commands.has_permissions(administrator=True)
 @is_admin_channel()
@@ -3069,7 +3211,7 @@ class HelpDropdown(discord.ui.Select):
             f"**🔒 Registration Control**\n> `!lock` · `!unlock` · `!notify_start <mins> [MATCH_X]`\n\n"
             f"**🗑️ Slot Management**\n> `!force_remove MATCH_X <slot#>` · `!reset_match MATCH_X`\n\n"
             f"**🎮 Part Configuration**\n> `!rename_part <1|2> <name>` · `!toggle_part <1|2>`\n\n"
-            f"**🛡️ Verification**\n> `!set_timeout <min>` · `!unverify @user`\n\n"
+            f"**🛡️ Verification**\n> `!set_timeout <min>` · `!unverify @user` · `!forceverify <target>`\n\n"
             f"**🧹 Utility**\n> `!clear [count]`",
             Theme.ROSE, "📖 Match Management")
 
